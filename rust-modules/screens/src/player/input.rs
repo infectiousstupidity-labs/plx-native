@@ -199,7 +199,7 @@ impl HudFocusSelection {
 /// Legacy draw/recorder projection of the engine's current key and row memory. Never a cursor.
 #[derive(Clone, Copy)]
 pub(crate) struct HudNav {
-    pub(crate) focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs
+    pub(crate) focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs, 3 = center Play/Pause
     pub(crate) btn: i32,   // 0 = Subtitles, 1 = Audio, 2 = More (within the buttons row)
     pub(crate) tab: i32,   // 0 = Info, 1 = Chapters (within the tabs row)
 }
@@ -213,7 +213,7 @@ impl HudNav {
     };
 
     pub(crate) fn from_engine(entry: plx_machine::machine::EntryId, read: &plx_machine::machine::FocusRead<u32>) -> Self {
-        use plx_appkit::player_hud::{ELEM_ROW_BASE, ELEM_TAB_BASE};
+        use plx_appkit::player_hud::{ELEM_CENTER_PLAY_PAUSE, ELEM_ROW_BASE, ELEM_TAB_BASE};
         let mut nav = Self::HOME;
         nav.btn = read.remembered(super::GROUP_ROW).unwrap_or(ELEM_ROW_BASE).saturating_sub(ELEM_ROW_BASE) as i32;
         nav.tab = read.remembered(super::GROUP_TABS).unwrap_or(ELEM_TAB_BASE).saturating_sub(ELEM_TAB_BASE) as i32;
@@ -221,6 +221,7 @@ impl HudNav {
             match key.elem {
                 e if (ELEM_ROW_BASE..ELEM_TAB_BASE).contains(&e) => { nav.focus = 1; nav.btn = (e - ELEM_ROW_BASE) as i32; }
                 e if (ELEM_TAB_BASE..plx_appkit::player_hud::ELEM_FAILURE_BASE).contains(&e) => { nav.focus = 2; nav.tab = (e - ELEM_TAB_BASE) as i32; }
+                ELEM_CENTER_PLAY_PAUSE => nav.focus = 3,
                 _ => {}
             }
         }

@@ -269,7 +269,9 @@ impl PlayerScreen {
         now: u32,
         measure: &dyn plx_machine::machine::Measure,
         meta: plx_data::metadata::MetadataView<'_>,
+        center_press_scale: f32,
     ) {
+        let center_available = self.center_available(ps, now);
         plx_appkit::player_hud::draw_hud(
             ps,
             &mut self.row,
@@ -283,6 +285,8 @@ impl PlayerScreen {
             self.transport,
             measure,
             meta,
+            center_available,
+            center_press_scale,
         );
     }
 
@@ -313,7 +317,7 @@ impl PlayerScreen {
         for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)) {
             // The repair alert's buttons are ordinary pressable controls (hover parks focus, the
             // press dips and commits on release); the transport's are `Direct` — see `draw`.
-            let (hover, activate) = if g.id == GROUP_REPAIR {
+            let (hover, activate) = if g.id == GROUP_REPAIR || g.id == GROUP_CENTER {
                 (Hover::Focus, Activate::Press)
             } else {
                 (Hover::Ignore, Activate::Direct)
@@ -357,6 +361,8 @@ impl PlayerScreen {
             // clickable: `Motion::chrome_interactive`
             GROUP_ROW => hud_drawn && !failed && self.transport && self.row.chrome_interactive(),
             GROUP_TABS => hud_drawn && !failed && self.row.chrome_interactive(),
+            // The center group is declared only behind the shared availability policy.
+            GROUP_CENTER => hud_drawn,
             _ => false,
         }
     }
@@ -367,6 +373,7 @@ impl PlayerScreen {
             GROUP_SCRUB => player_hud::ELEM_SCRUB,
             GROUP_ROW => player_hud::ELEM_ROW_BASE + i,
             GROUP_TABS => player_hud::ELEM_TAB_BASE + i,
+            GROUP_CENTER => player_hud::ELEM_CENTER_PLAY_PAUSE,
             GROUP_FAILURE => player_hud::ELEM_FAILURE_BASE + i,
             _ => REPAIR_CANCEL + i,
         }
@@ -428,6 +435,8 @@ impl PlayerScreen {
             }
         }
         mix(u64::from(plx_media::player::TX.paused.load(Relaxed)));
+        mix(u64::from(plx_media::player::transport::viewer_paused()));
+        mix(u64::from(self.center_available(ps, now)));
         // …subtitles are NOT conditional: they are drawn on every frame of the route, HUD or no
         // HUD, which is exactly why a cue appearing had to become a report.
         mix(self.render.ass.fingerprint());
@@ -510,6 +519,29 @@ impl PlayerScreen {
     fn hud_drawn(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
         self.subs_lift(ps, now) && !self.repair_alert.visible()
     }
+
+    fn center_available(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
+        player_hud::center_transport_available(
+            plx_media::player::state(ps), plx_media::player::seen_frame(),
+            self.hud_drawn(ps, now), self.transport,
+            self.repair_alert.visible() || player_hud::readout_owns_frame(self.busy),
+            self.row.chrome_interactive(),
+        )
+    }
+
+    fn center_press_scale<H: AppLike>(&self, cx: &Cx<'_, H>) -> f32 {
+        if cx.press.owner == Some(FocusKey { entry: self.entry, elem: player_hud::ELEM_CENTER_PLAY_PAUSE }) {
+            cx.press.scale
+        } else { 0.0 }
+    }
+
+    fn activate_center<H: AppLike>(&mut self, ps: &plx_media::route::PlaybackSession, now: u32, fx: &mut Effects<'_, H>) {
+        if self.hud_policy != HudPolicy::Normal || !self.center_available(ps, now) { return; }
+        self.scrub.cancel();
+        self.hud.extend(now, input::HUD_LINGER_MS);
+        self.publish();
+        Self::ask(fx, PlayerReq::Transport(None));
+    }
 }
 
 /// The four focus groups [`PlayerScreen`] registers (restructure phase 12, D2): the scrubber, the
@@ -522,6 +554,7 @@ const GROUP_ROW: GroupId = GroupId(1);
 const GROUP_TABS: GroupId = GroupId(2);
 const GROUP_FAILURE: GroupId = GroupId(3);
 const GROUP_REPAIR: GroupId = GroupId(4);
+const GROUP_CENTER: GroupId = GroupId(5);
 const REPAIR_CANCEL: u32 = 40_000;
 const REPAIR_CONFIRM: u32 = REPAIR_CANCEL + 1;
 
@@ -628,6 +661,14 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
             }
         }
         match ev {
+            ScreenEvent::PressCommit(_) => {
+                if cx.focus.current == Some(FocusKey { entry: self.entry, elem: player_hud::ELEM_CENTER_PLAY_PAUSE }) {
+                    self.activate_center(H::session(cx), cx.tick.ms, fx);
+                }
+                Handled::Yes
+            }
+            // Center activation commits exclusively through the dispatcher's press machine.
+            ScreenEvent::Activate(elem) if *elem == player_hud::ELEM_CENTER_PLAY_PAUSE => Handled::Yes,
             ScreenEvent::FocusMoved { to, .. } => {
                 // `cx` already contains the committed engine key and remembered selections.
                 if to.entry == self.entry && to.elem != player_hud::ELEM_SCRUB {
@@ -653,6 +694,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 // was open (`TransportRow::step`'s own doc).
                 self.row
                     .step(self.slot, self.hud.nav.focus, self.hud.nav.btn, tick.dt(), tick.ms);
+                self.row.step_center(self.hud.nav.focus == 3 && self.center_available(H::session(cx), tick.ms), tick.dt());
                 // …and the Up Next countdown, which arms on APPEARANCE and is dropped with the
                 // segment. Stepped for the whole route, not per-overlay: the countdown must keep
                 // running whichever panel is up (`up_next::tick`).
@@ -773,6 +815,8 @@ impl PlayerScreen {
         fx: &mut Effects<'_, H>,
     ) -> Handled {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_ROW_BASE, ELEM_SCRUB, ELEM_TAB_BASE};
+        // Both live and stale center clicks are owned by Activate::Press, never this direct path.
+        if hit == Some(player_hud::ELEM_CENTER_PLAY_PAUSE) { return Handled::Yes; }
         let failed = plx_appkit::player_hud::transport_hidden(ps);
         let Some(elem) = hit else {
             // **A click that lands on no control at all toggles play/pause** — the `else` arm of
@@ -1025,6 +1069,17 @@ impl PlayerScreen {
                     Edge::Up => self.key_scrub_release(now),
                 }
                 Handled::Yes
+            }
+            Key::Ok if self.hud.nav.focus == 3 => {
+                if edge == Edge::Down && self.hud.visible_at_press && self.center_available(ps, now)
+                    && self.hud_policy == HudPolicy::Normal {
+                    Handled::No // the shared dispatcher arms the focused control
+                } else {
+                    if edge == Edge::Down && !self.hud.visible_at_press {
+                        self.focus_request(HudFocusRequest::Scrubber, fx);
+                    }
+                    Handled::Yes
+                }
             }
             Key::Ok => {
                 match edge {
@@ -1333,6 +1388,14 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             len: row_len,
             elem: plx_ui::screen::ElemKind::Control,
         });
+        if self.center_available(H::session(cx), cx.tick.ms) {
+            out.push(GroupSpec {
+                id: GROUP_CENTER, kind: GroupKind::Row { wrap: false }, seat: Seat::Remembered,
+                reachable: AxisMask::BOTH, edge: [EdgeRule::Stop; 4],
+                extent: player_hud::center_play_pause_rect(1.0), len: 1,
+                elem: plx_ui::screen::ElemKind::Control,
+            });
+        }
         let has_ch = plx_appkit::chapters_panel::has_chapters(H::metadata(cx));
         out.push(GroupSpec {
             id: GROUP_TABS,
@@ -1362,12 +1425,13 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             });
         }
     }
-    fn group_of(&self, key: &u32, _cx: &Cx<'_, H>) -> Option<GroupId> {
+    fn group_of(&self, key: &u32, cx: &Cx<'_, H>) -> Option<GroupId> {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_ROW_BASE, ELEM_SCRUB, ELEM_TAB_BASE};
         if self.repair_alert.visible() {
             return matches!(*key, REPAIR_CANCEL | REPAIR_CONFIRM).then_some(GROUP_REPAIR);
         }
         match *key {
+            e if e == player_hud::ELEM_CENTER_PLAY_PAUSE && self.center_available(H::session(cx), cx.tick.ms) => Some(GROUP_CENTER),
             e if e == ELEM_SCRUB => Some(GROUP_SCRUB),
             e if (ELEM_ROW_BASE..ELEM_TAB_BASE).contains(&e) => Some(GROUP_ROW),
             e if (ELEM_TAB_BASE..ELEM_FAILURE_BASE).contains(&e) => Some(GROUP_TABS),
@@ -1398,12 +1462,21 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
         };
         Step::Move(FocusKey { entry: self.entry, elem })
     }
-    fn place(&self, key: &u32, cx: &Cx<'_, H>, _at: At) -> Option<Placed> {
+    fn place(&self, key: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_ROW_BASE, ELEM_SCRUB, ELEM_TAB_BASE};
         if self.repair_alert.visible() {
             if !matches!(*key, REPAIR_CANCEL | REPAIR_CONFIRM) { return None; }
             let rect = self.repair_rect(*key == REPAIR_CONFIRM, cx.measure);
             return Some(Placed { rect, rest_rect: rect, clip: Rect::FULL, index: None });
+        }
+        if *key == player_hud::ELEM_CENTER_PLAY_PAUSE {
+            if !self.center_available(H::session(cx), cx.tick.ms) { return None; }
+            let rest_rect = player_hud::center_play_pause_rect(1.0);
+            let rect = match at {
+                At::SpringTarget => rest_rect,
+                At::Drawn => player_hud::center_play_pause_rect(self.row.center_scale(self.center_press_scale(cx))),
+            };
+            return Some(Placed { rect, rest_rect, clip: Rect::FULL, index: Some(0) });
         }
         let rect = match *key {
             e if e == ELEM_SCRUB => player_hud::scrub_hit_rect(),
@@ -1428,6 +1501,10 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
         } else if player_hud::readout_owns_frame(self.busy) {
             let n = player_hud::FailureReadout::now(H::session(cx)).actions().len() as u32;
             player_hud::ELEM_FAILURE_BASE + want.elem.saturating_sub(player_hud::ELEM_FAILURE_BASE).min(n.saturating_sub(1))
+        } else if (player_hud::ELEM_CENTER_BASE..player_hud::ELEM_CENTER_END).contains(&want.elem) {
+            if self.center_available(H::session(cx), cx.tick.ms) { player_hud::ELEM_CENTER_PLAY_PAUSE }
+            else if !self.transport && self.hud_drawn(H::session(cx), cx.tick.ms) { player_hud::ELEM_TAB_BASE }
+            else { player_hud::ELEM_SCRUB }
         } else if want.elem >= player_hud::ELEM_ROW_BASE && want.elem < player_hud::ELEM_TAB_BASE {
             if self.transport { player_hud::ELEM_ROW_BASE + (want.elem - player_hud::ELEM_ROW_BASE).min(self.slot.items().saturating_sub(1) as u32) }
             else { player_hud::ELEM_TAB_BASE }
@@ -1443,6 +1520,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             GROUP_TABS => player_hud::ELEM_TAB_BASE,
             GROUP_FAILURE => player_hud::ELEM_FAILURE_BASE,
             GROUP_REPAIR => REPAIR_CANCEL,
+            GROUP_CENTER => player_hud::ELEM_CENTER_PLAY_PAUSE,
             _ => player_hud::ELEM_SCRUB,
         };
         FocusKey { entry: self.entry, elem }
@@ -1535,7 +1613,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         // and so cannot be carried by a bare `ScreenEvent::Activate` at all.
         let hud_drawn = self.hud_drawn(ps, now);
         if hud_drawn {
-            self.draw_hud(ps, now, f.measure, H::metadata(f.cx));
+            self.draw_hud(ps, now, f.measure, H::metadata(f.cx), self.center_press_scale(f.cx));
         } else {
             self.row.reset_title();
         }
@@ -1568,8 +1646,10 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         out.extend([
             Link { from: GROUP_ROW, dir: Dir::Down, to: GROUP_SCRUB },
             Link { from: GROUP_SCRUB, dir: Dir::Up, to: GROUP_ROW },
-            Link { from: GROUP_SCRUB, dir: Dir::Down, to: GROUP_TABS },
-            Link { from: GROUP_TABS, dir: Dir::Up, to: GROUP_SCRUB },
+            Link { from: GROUP_SCRUB, dir: Dir::Down, to: GROUP_CENTER },
+            Link { from: GROUP_CENTER, dir: Dir::Up, to: GROUP_SCRUB },
+            Link { from: GROUP_CENTER, dir: Dir::Down, to: GROUP_TABS },
+            Link { from: GROUP_TABS, dir: Dir::Up, to: GROUP_CENTER },
         ]);
     }
     fn focus_source(&self) -> FocusSource {
@@ -1832,7 +1912,7 @@ mod step_ladder_tests {
         let owner = InputOwner::Entry(ENTRY);
         let nav = page.hud.nav;
         engine.restore_remembered(ENTRY, &[(GROUP_ROW, 10 + nav.btn as u32), (GROUP_TABS, 20 + nav.tab as u32)]);
-        let (elem, group) = match nav.focus { 1 => (10 + nav.btn as u32, GROUP_ROW), 2 => (20 + nav.tab as u32, GROUP_TABS), _ => (0, GROUP_SCRUB) };
+        let (elem, group) = match nav.focus { 1 => (10 + nav.btn as u32, GROUP_ROW), 2 => (20 + nav.tab as u32, GROUP_TABS), 3 => (player_hud::ELEM_CENTER_PLAY_PAUSE, GROUP_CENTER), _ => (0, GROUP_SCRUB) };
         engine.set(owner, FocusKey { entry: ENTRY, elem }, Some(group), plx_ui::screen::By::Restore);
         engine
     }
@@ -2397,7 +2477,7 @@ mod step_ladder_tests {
     }
 
     /// …and an UP-hide done WHILE the pipeline is busy arms nothing either: only a BACK-hide is the
-    /// viewer asking to leave. The test above hides in `Playing`, so it could not tell `key_updown`
+    /// viewer asking to leave. The test above hides in `Playing`, so it could not tell the Up-hide path
     /// passing `false` to `HudState::hide` from passing the live `loading()`; this one can.
     #[test]
     fn an_up_hide_while_busy_does_not_arm_the_exit() {
@@ -2464,11 +2544,11 @@ mod step_ladder_tests {
         assert!(reqs.is_empty() && !page.hud.dismissed, "the release edge neither hides nor leaves");
     }
 
-    /// Port of `key_player_updown`: from the scrubber, UP walks to the control row and DOWN to the
-    /// tabs; from either, the return trip goes back to the scrubber.
+    /// Eligible playback exposes the centered action between the scrubber and bottom tabs.
     #[test]
-    fn updown_walks_the_huds_three_rows() {
+    fn updown_walks_the_huds_center_action() {
         let _g = plx_base::testlock::serial();
+        let was = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Paused);
         let mut page = PlayerScreen::new(ENTRY);
         fresh(&mut page);
         assert_eq!(page.hud.nav.focus, 0);
@@ -2479,11 +2559,114 @@ mod step_ladder_tests {
         press(&mut page, SDLK_DOWN, 0, Edge::Down);
         assert_eq!(page.hud.nav.focus, 0, "the first press reveals the hand-hidden transport");
         press(&mut page, SDLK_DOWN, 0, Edge::Down);
-        assert_eq!(page.hud.nav.focus, 2, "scrubber -> tabs");
+        assert_eq!(page.hud.nav.focus, 3, "scrubber -> center action");
+        press(&mut page, SDLK_DOWN, 0, Edge::Down);
+        assert_eq!(page.hud.nav.focus, 2, "center action -> tabs");
         press(&mut page, SDLK_DOWN, 0, Edge::Down);
         assert_eq!(page.hud.nav.focus, 2, "tabs has nothing below: stays");
         press(&mut page, SDLK_UP, 0, Edge::Down);
-        assert_eq!(page.hud.nav.focus, 0, "tabs -> scrubber");
+        assert_eq!(page.hud.nav.focus, 3, "tabs -> center action");
+        press(&mut page, SDLK_UP, 0, Edge::Down);
+        assert_eq!(page.hud.nav.focus, 0, "center action -> scrubber");
+        plx_media::player::restore_state_for_test(was);
+    }
+
+    #[test]
+    fn center_action_policy_matches_groups_placement_and_stops() {
+        use plx_media::player::{PlaybackState as S, SHARED};
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(S::Idle);
+        let seen = SHARED.seen_frame.load(std::sync::atomic::Ordering::Relaxed);
+        for (state, presented, eligible) in [
+            (S::Idle, false, false), (S::Resolving, false, false),
+            (S::Connecting, false, false), (S::Buffering, false, false),
+            (S::Seeking, false, false), (S::Playing, false, true),
+            (S::Paused, false, true), (S::Buffering, true, true), (S::Seeking, true, true),
+        ] {
+            plx_media::player::restore_state_for_test(state as u8);
+            SHARED.seen_frame.store(presented, std::sync::atomic::Ordering::Relaxed);
+            let mut page = PlayerScreen::new(ENTRY);
+            fresh(&mut page);
+            let mut context = cx(); context.tick.ms = 1_000;
+            let mut groups = Vec::new(); Focusable::<TestHost>::groups(&page, &context, &mut groups);
+            assert_eq!(groups.iter().any(|g| g.id == GROUP_CENTER), eligible, "{state:?}");
+            let placed = Focusable::<TestHost>::place(&page, &player_hud::ELEM_CENTER_PLAY_PAUSE, &context, At::Drawn);
+            assert_eq!(placed.is_some(), eligible, "{state:?}");
+            let stops = page.hud_stops_for_test(&context);
+            assert_eq!(stops.iter().any(|s| s.key.elem == player_hud::ELEM_CENTER_PLAY_PAUSE), eligible, "{state:?}");
+            if eligible {
+                for _ in 0..30 { page.row.step_center(true, 1.0 / 60.0); }
+                let drawn = Focusable::<TestHost>::place(&page, &player_hud::ELEM_CENTER_PLAY_PAUSE, &context, At::Drawn).unwrap();
+                let target = Focusable::<TestHost>::place(&page, &player_hud::ELEM_CENTER_PLAY_PAUSE, &context, At::SpringTarget).unwrap();
+                assert_eq!(target.rect, player_hud::center_play_pause_rect(1.0));
+                assert_eq!(drawn.rect, player_hud::center_play_pause_rect(page.row.center_scale(0.0)));
+                assert!(drawn.rect.w > target.rect.w);
+                assert_eq!(drawn.rect.cx(), 960.0);
+                let stop = page.hud_stops_for_test(&context).into_iter().find(|s| s.key.elem == player_hud::ELEM_CENTER_PLAY_PAUSE).unwrap();
+                assert_eq!(stop.rect, drawn.rect);
+                assert_eq!(stop.rest_rect, target.rect);
+                assert_eq!(stop.activate, Activate::Press);
+                page.set_hud_policy(HudPolicy::Hidden);
+                assert!(Focusable::<TestHost>::place(&page, &player_hud::ELEM_CENTER_PLAY_PAUSE, &context, At::Drawn).is_none());
+            }
+        }
+        SHARED.seen_frame.store(seen, std::sync::atomic::Ordering::Relaxed);
+        plx_media::player::restore_state_for_test(previous);
+    }
+
+    #[test]
+    fn center_commit_is_guarded_and_direct_activation_is_inert() {
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Paused);
+        let mut page = PlayerScreen::new(ENTRY); fresh(&mut page);
+        page.hud.nav.focus = 3;
+        assert!(press(&mut page, SDLK_RETURN, 0, Edge::Down).1.is_empty(), "raw OK does not toggle");
+        assert!(click(&mut page, player_hud::ELEM_CENTER_PLAY_PAUSE).1.is_empty());
+        assert!(run_event(&mut page, ScreenEvent::Activate(player_hud::ELEM_CENTER_PLAY_PAUSE)).1.is_empty());
+        let commit = || ScreenEvent::PressCommit(plx_machine::machine::PressId(1));
+        assert_eq!(run_event(&mut page, commit()).1, vec![PlayerReq::Transport(None)]);
+        page.hud.dismissed = true;
+        assert!(run_event(&mut page, commit()).1.is_empty(), "a late hidden commit is inert");
+        page.hud.dismissed = false;
+        page.transport = false;
+        assert!(run_event(&mut page, commit()).1.is_empty(), "withheld middle is inert");
+        page.transport = true;
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Error as u8);
+        assert!(run_event(&mut page, commit()).1.is_empty(), "failure revokes a previously armed action");
+        plx_media::player::restore_state_for_test(previous);
+    }
+
+    #[test]
+    fn center_focus_waits_for_scrub_chrome_to_restore() {
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Playing);
+        let duration = plx_media::player::SHARED.duration_ns.swap(100_000_000_000, std::sync::atomic::Ordering::Relaxed);
+        let mut page = PlayerScreen::new(ENTRY); fresh(&mut page);
+        press(&mut page, plx_ui::consts::SDLK_RIGHT, 0, Edge::Down);
+        for now in (1_000..=1_320).step_by(16) { tick(&mut page, now); }
+        assert!(!page.row.chrome_interactive());
+        let mut engine = engine_for(&page);
+        let owner = InputOwner::Entry(ENTRY);
+        let mut context = cx(); context.tick.ms = 1_336; context.focus = engine.read(owner);
+        let input = ScreenEvent::Input(InputEvent { at: context.tick, source: Source::Sdl,
+            kind: InputKind::Key { key: plx_machine::machine::Key::Down, sym: SDLK_DOWN, wcode: 0, edge: Edge::Down, at_edge: false } });
+        let mut effects = Vec::new(); let mut present = plx_machine::present::Present::new();
+        assert_eq!(page.step(&input, &context, &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present)), Handled::No);
+        assert!(!page.scrub.is_live(), "travel cancels instead of committing the preview");
+        let mut links = Vec::new(); Screen::<TestHost>::links(&page, &mut links);
+        engine.move_dir(owner, &page, &links, Dir::Down, &context);
+        assert_eq!(engine.current(owner).unwrap().elem, player_hud::ELEM_SCRUB);
+        assert!(page.hud_stops_for_test(&context).iter().all(|s| s.key.elem != player_hud::ELEM_CENTER_PLAY_PAUSE));
+        for now in (1_352..=2_200).step_by(16) {
+            context.tick.ms = now; context.focus = engine.read(owner);
+            let mut effects = Vec::new(); let mut present = plx_machine::present::Present::new();
+            page.step(&ScreenEvent::Tick(context.tick), &context, &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present));
+            engine.reconcile(owner, &page, &context);
+        }
+        let landed = engine.current(owner).unwrap().elem;
+        plx_media::player::SHARED.duration_ns.store(duration, std::sync::atomic::Ordering::Relaxed);
+        plx_media::player::restore_state_for_test(previous);
+        assert_eq!(landed, player_hud::ELEM_CENTER_PLAY_PAUSE, "the original Down must finish only after chrome becomes interactive");
     }
 
     #[test]
