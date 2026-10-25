@@ -7881,6 +7881,68 @@ mod lifecycle_regression_tests {
         stops
     }
 
+    /// HUD-01.05: a real center stop, engine travel and a complete OK press, not the
+    /// intentionally right-aligned secondary cluster or an unregistered picture toggle.
+    #[test]
+    fn player_hud_center_play_pause_has_a_real_stop_and_one_ok_action() {
+        use plx_media::player::PlaybackState;
+        use plx_screens::registry::PlayerReq;
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::keep();
+        // Freeze the new three-element range at 40..43, with only its middle action in task 05.
+        // A literal keeps this test compilable against the pre-feature production API.
+        let center = 41;
+        for state in [PlaybackState::Idle, PlaybackState::Buffering] {
+            set_paused(false);
+            let mut app = player_sdl_app();
+            plx_media::player::restore_state_for_test(state as u8);
+            pin_headless_hud(&mut app, 0, None);
+            frame(&mut app, 16);
+            assert_eq!(plx_media::player::state(&app.player.session), state);
+            assert!(!plx_media::player::seen_frame(), "fixture: cold playback");
+            assert!(present_player_hud_stops(&mut app, 16).iter().all(|stop| stop.key.elem != center),
+                "Idle and cold Buffering must not expose a center action");
+        }
+        for is_paused in [false, true] {
+            set_paused(is_paused);
+            let mut app = player_sdl_app();
+            pin_headless_hud(&mut app, 0, None);
+            let state = if is_paused { PlaybackState::Paused } else { PlaybackState::Playing };
+            assert_eq!(plx_media::player::state(&app.player.session), state,
+                "fixture: eligible playback, including paused without a first frame");
+            assert!(super::super::bridge::player(&app.pages).unwrap().transport);
+            assert_eq!(app.pages.focus().unwrap().elem, 0, "fresh HUD seats the scrubber");
+            let stops = present_player_hud_stops(&mut app, 0);
+            let stop = stops.iter().find(|stop| stop.key.elem == center).unwrap_or_else(|| {
+                panic!("eligible {state:?} HUD has no real centered Play/Pause stop; actual stops: {:?}",
+                    stops.iter().map(|stop| stop.key.elem).collect::<Vec<_>>())
+            });
+            assert_eq!(stop.rest_rect.cx(), plx_ui::consts::SCR_W * 0.5);
+            assert_eq!((stop.rest_rect.w, stop.rest_rect.h), (64.0, 64.0));
+            let info = stops.iter().find(|stop| stop.key.elem == 20).expect("the real Info tab");
+            assert_eq!(stop.rest_rect.y, info.rest_rect.y, "reuse the bottom tab band");
+            player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_DOWN, 0, true), 16);
+            player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_DOWN, 0, false), 17);
+            assert!(dispatch_player_sdl(&mut app, 32).is_empty(), "travel emits no action");
+            assert_eq!(app.pages.focus().unwrap().elem, center, "scrubber Down seats Play/Pause");
+            let mut requests = Vec::new();
+            for (now, bytes) in [
+                (48, encode_key(plx_ui::consts::SDLK_RETURN, 0, true)),
+                (64, encode_key_repeat(plx_ui::consts::SDLK_RETURN, 0)),
+                (80, encode_key(plx_ui::consts::SDLK_RETURN, 0, false)),
+            ] {
+                player_sdl(&mut app, bytes, now);
+                requests.extend(dispatch_player_sdl(&mut app, now));
+            }
+            for now in (96..=800).step_by(16) {
+                requests.extend(dispatch_player_sdl(&mut app, now));
+            }
+            assert_eq!(requests, vec![PlayerReq::Transport(None)], "one completed OK, one toggle");
+            player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RETURN, 0, false), 816);
+            assert!(dispatch_player_sdl(&mut app, 816).is_empty(), "duplicate release is inert");
+        }
+    }
+
     #[test]
     fn player_hud_pointer_identity_survives_arrows_and_ok() {
         use plx_screens::registry::PlayerReq;
