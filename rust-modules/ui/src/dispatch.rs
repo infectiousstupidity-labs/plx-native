@@ -59,6 +59,9 @@ impl<H: Host> Focusable<H> for PageWithStrip<'_, H>
 where
     H::Elem: IndexElem,
 {
+    fn link_wait(&self, link: super::screen::Link, cx: &Cx<'_, H>) -> bool {
+        self.page.link_wait(link, cx)
+    }
     fn groups(&self, cx: &Cx<'_, H>, out: &mut Vec<GroupSpec>) {
         if let Some((spec, _)) = &self.strip {
             out.push(*spec);
@@ -195,6 +198,7 @@ pub struct FocusAnswer<K> {
     pub outcome: Outcome<K>,
     pub focus: Option<FocusKey<K>>,
     pub group: Option<GroupId>,
+    pub pending: Option<super::focus::LinkWait<K>>,
 }
 
 pub struct NoTap;
@@ -616,6 +620,7 @@ where
     }
 
     pub fn request_with_return(&mut self, from: MachineId, op: NavOp<H::Arg>, ret: ReturnState<H::Elem, H::Memory>) {
+        self.input.engine.cancel_link_wait();
         self.parked.push((Stamped {
             from,
             fx: Fx::Nav(op),
@@ -623,12 +628,14 @@ where
     }
 
     fn park(&mut self, item: Stamped<H>) {
+        self.input.engine.cancel_link_wait();
         let ret = self.return_state();
         self.parked.push((item, ret));
     }
 
     /// `Lifecycle(0x103/0x104)`: `Suspend` down the tree at the next commit.
     pub fn suspend(&mut self) {
+        self.input.engine.cancel_link_wait();
         let life = self.nav.suspend();
         self.parked_life.extend(life);
     }
@@ -968,6 +975,9 @@ where
         let mut head: Vec<Stamped<H>> = Vec::new();
         // The television keyboard's state AS OF each event: its edges take effect in delivery
         // order, so a pointer behind an edge in this batch must see that edge.
+        if self.input.engine.pending_link().is_some_and(|p| p.owner != self.owner()) {
+            self.input.engine.cancel_link_wait();
+        }
         let mut keyboard = self.input.keyboard;
         for mut ev in inputs {
             if let InputKind::SystemKeyboard(up) = ev.kind { keyboard = up; }
@@ -985,6 +995,7 @@ where
                 tap.input(f, &ev);
                 continue;
             }
+            if pointer.is_some() { self.input.engine.cancel_link_wait(); }
             if let Some((kind, x, y)) = pointer {
                 {
                     if self.hit_page() {
@@ -2128,6 +2139,27 @@ where
                     report.dropped_deliveries += 1;
                     return;
                 }
+                if self.input.engine.pending_link().is_some_and(|p| p.owner != self.owner()) {
+                    self.input.engine.cancel_link_wait();
+                }
+                if self.input.engine.pending_link().is_some() {
+                    match &ev {
+                        ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, edge, .. }, .. }) => {
+                            if *key == Key::Ok {
+                                self.input.engine.cancel_link_wait();
+                                self.input.cancel_press();
+                                return; // before the source screen's raw confirm fallback
+                            }
+                            if *edge == Edge::Repeat { return; }
+                            if *edge == Edge::Down { self.input.engine.cancel_link_wait(); }
+                        }
+                        ScreenEvent::Input(_) | ScreenEvent::Activate(_) | ScreenEvent::Enter(_)
+                        | ScreenEvent::WillLeave(_) | ScreenEvent::Cover | ScreenEvent::Unmount => {
+                            self.input.engine.cancel_link_wait();
+                        }
+                        _ => {}
+                    }
+                }
                 // Ingest releases an already-live gesture before the press Tick. A Down in
                 // THIS input batch creates its arm later, while draining, so apply subsequent
                 // physical edges in delivery order too. These operations are idempotent for
@@ -2262,6 +2294,7 @@ where
     }
 
     fn cancel_keyboard_gestures(&mut self, report: &mut FrameReport) {
+        self.input.engine.cancel_link_wait();
         self.input.cancel_press();
         // Tick may have queued a result behind this ownership edge. Returning to the same
         // page restores its input scope, not the revoked gesture.
@@ -2315,7 +2348,7 @@ where
                         self.nav.entry(entry).and_then(|e| e.ret.focus),
                     ),
                 };
-                let outcome = self.focus_resolution(rig, parts, entry, 0, tap,
+                let outcome = self.focus_resolution(rig, parts, entry, 0, None, tap,
                     |engine, view, cx| engine.enter(owner, view, target, restored, cx));
                 if let Outcome::Moved { from, to, by } = outcome {
                     out.push(Stamped {
@@ -2333,7 +2366,7 @@ where
                         return KeyFate::Dead; // re-delivered under EdgeRule::Screen and still unhandled: dropped
                     }
                     let mut links = Vec::new();
-                    let outcome = self.focus_resolution(rig, parts, entry, 1, tap, |engine, view, cx| {
+                    let outcome = self.focus_resolution(rig, parts, entry, 1, Some(dir), tap, |engine, view, cx| {
                         view.page.links(&mut links);
                         engine.move_dir(owner, view, &links, dir, cx)
                     });
@@ -2482,12 +2515,13 @@ where
     /// Resolve on a scratch scope during replay. An experimental algorithm cannot pollute
     /// remembered groups before the recorded answer is installed and its effects are emitted.
     fn focus_resolution(&mut self, rig: &mut dyn Rig<H>, parts: &CxParts<H::Elem>, entry: EntryId,
-        phase: u8, tap: &mut dyn Tap<H>,
+        phase: u8, dir: Option<Dir>, tap: &mut dyn Tap<H>,
         resolve: impl FnOnce(&mut super::focus::FocusEngine<H::Elem>, &PageWithStrip<'_, H>, &Cx<'_, H>) -> Outcome<H::Elem>,
     ) -> Outcome<H::Elem> {
         let owner = InputOwner::Entry(entry);
         let mode = tap.resolution_mode();
         let before = self.input.engine.current(owner);
+        let before_pending = self.input.engine.pending_link();
         let actual = if mode == Some(false) { None } else {
             let Some(view) = Self::owner_view(&self.nav, entry) else { return Outcome::Nothing; };
             let Split { views, measure, .. } = rig.split();
@@ -2498,10 +2532,11 @@ where
                     scratch.set(owner, key, self.input.engine.current_group(owner), super::screen::By::Restore);
                 }
                 scratch.restore_remembered(entry, &self.input.engine.remembered_for(entry));
+                scratch.restore_link_wait(before_pending);
                 scratch
             } else { &mut self.input.engine };
             let outcome = resolve(engine, &view, &cx);
-            Some(FocusAnswer { outcome, focus:engine.current(owner), group:engine.current_group(owner) })
+            Some(FocusAnswer { outcome, focus:engine.current(owner), group:engine.current_group(owner), pending:engine.pending_link() })
         };
         let Some(answer) = tap.resolve_focus(self.frame, phase, entry, actual) else {
             tap.resolution_error("missing focus resolution");
@@ -2529,8 +2564,30 @@ where
                 },
                 None => answer.group.is_none(),
             };
-            if !valid { tap.resolution_error("impossible focus resolution"); return Outcome::Nothing; }
-            if mode.is_some() { self.set_focus_in(answer.focus, answer.group); }
+            let valid_pending = match answer.pending {
+                None => true,
+                Some(pending) => {
+                    let Some(view) = Self::owner_view(&self.nav, entry) else { return Outcome::Nothing; };
+                    let Split { views, measure, .. } = rig.split();
+                    let cx = parts.cx::<H>(views, measure);
+                    let mut links = Vec::new();
+                    view.page.links(&mut links);
+                    let mut groups = Vec::new();
+                    view.groups(&cx, &mut groups);
+                    matches!(answer.outcome, Outcome::Nothing) && answer.focus == Some(pending.source)
+                        && answer.group == Some(pending.link.from)
+                        && ((phase == 1 && dir == Some(pending.link.dir))
+                            || (phase == 2 && before_pending == Some(pending)))
+                        && self.input.engine.valid_link_wait(pending, owner, &view, &links, &cx)
+                        && !groups.iter().any(|g| g.id == pending.link.to && g.len > 0)
+                        && view.link_wait(pending.link, &cx)
+                }
+            };
+            if !valid || !valid_pending { tap.resolution_error("impossible focus resolution"); return Outcome::Nothing; }
+            if mode.is_some() {
+                self.set_focus_in(answer.focus, answer.group);
+                self.input.engine.restore_link_wait(answer.pending);
+            }
         }
         answer.outcome
     }
@@ -2539,15 +2596,20 @@ where
     /// `Reconcile` move delivered before draw.
     fn reconcile(&mut self, rig: &mut dyn Rig<H>, parts: &CxParts<H::Elem>, report: &mut FrameReport,
         tap: &mut dyn Tap<H>) {
-        if !self.engine_page() {
+        if !self.engine_page() || self.input.keyboard {
+            self.input.engine.cancel_link_wait();
             return;
         }
         let Some(entry) = self.owner_entry() else {
             return;
         };
         let owner = InputOwner::Entry(entry);
-        let outcome = self.focus_resolution(rig, parts, entry, 2, tap,
-            |engine, view, cx| engine.reconcile(owner, view, cx));
+        let outcome = self.focus_resolution(rig, parts, entry, 2, None, tap,
+            |engine, view, cx| {
+                let mut links = Vec::new();
+                view.page.links(&mut links);
+                engine.reconcile_linked(owner, view, &links, cx)
+            });
         if let Outcome::Moved { from, to, by } = outcome {
             // A catalog reconciliation changes the cursor, not the identity of an ongoing
             // gesture. Never let release activate the fallback item that replaced its arm.
@@ -3616,5 +3678,135 @@ mod prewarm_pass_tests {
         assert_eq!(prewarm_text_target(false, true, false), Some(PrewarmTarget::HeldTop));
         // OUT shows the OUTGOING page's image: its text is resident; the destination is not.
         assert_eq!(prewarm_text_target(true, true, false), Some(PrewarmTarget::Pending));
+    }
+}
+
+#[cfg(test)]
+mod linked_wait_tests {
+    use super::*;
+    use crate::fixture::{tick, FixtureArg, FixtureHost, FixtureRig};
+    use crate::focus::tree::{LinkedChrome, CHROME_LINK};
+    use plx_machine::machine::{Canon, LogicalState, Machine};
+    use std::{cell::Cell, rc::Rc};
+
+    #[derive(Default)]
+    struct Counts { raw_ok: Cell<u32>, commits: Cell<u32>, landings: Cell<u32> }
+    impl LogicalState for Counts {
+        fn write(&self, c: &mut Canon) { c.u32(self.raw_ok.get()).u32(self.commits.get()).u32(self.landings.get()); }
+    }
+    struct ChromeScreen { page: LinkedChrome, counts: Rc<Counts> }
+    impl Focusable<FixtureHost> for ChromeScreen {
+        fn link_wait(&self,l: super::super::screen::Link,cx:&Cx<'_,FixtureHost>)->bool { self.page.link_wait(l,cx) }
+        fn groups(&self,cx:&Cx<'_,FixtureHost>,out:&mut Vec<GroupSpec>) { self.page.groups(cx,out); }
+        fn group_of(&self,k:&u32,cx:&Cx<'_,FixtureHost>)->Option<GroupId> { self.page.group_of(k,cx) }
+        fn neighbour(&self,k:FocusKey<u32>,d:Dir,cx:&Cx<'_,FixtureHost>)->Step<u32> { self.page.neighbour(k,d,cx) }
+        fn place(&self,k:&u32,cx:&Cx<'_,FixtureHost>,at:At)->Option<Placed> { self.page.place(k,cx,at) }
+        fn reconcile(&self,k:FocusKey<u32>,cx:&Cx<'_,FixtureHost>)->FocusKey<u32> { self.page.reconcile(k,cx) }
+        fn seat(&self,g:GroupId,p:Placed,cx:&Cx<'_,FixtureHost>)->FocusKey<u32> { self.page.seat(g,p,cx) }
+    }
+    impl Machine<FixtureHost> for ChromeScreen {
+        type Ev=ScreenEvent<FixtureHost>;
+        fn step(&mut self,ev:&Self::Ev,_:&Cx<'_,FixtureHost>,_:&mut Effects<'_,FixtureHost>)->Handled {
+            match ev {
+                ScreenEvent::Tick(t) => self.page.ready=t.ms>=100,
+                // A real source-screen fallback, not a fabricated FocusAnswer or stop.
+                ScreenEvent::Input(InputEvent { kind:InputKind::Key { key:Key::Ok,edge:Edge::Down,.. },.. }) => {
+                    self.counts.raw_ok.set(self.counts.raw_ok.get()+1);
+                    return Handled::Yes;
+                }
+                ScreenEvent::PressCommit(_) => self.counts.commits.set(self.counts.commits.get()+1),
+                ScreenEvent::FocusMoved { to,.. } if to.elem/1000==2 => self.counts.landings.set(self.counts.landings.get()+1),
+                _ => {}
+            }
+            Handled::No
+        }
+    }
+    impl Screen<FixtureHost> for ChromeScreen {
+        fn name(&self)->&'static str { "linked-chrome" }
+        fn state(&self)->&dyn LogicalState { &*self.counts }
+        fn prepare(&mut self,_:&mut Budget,_:&Cx<'_,FixtureHost>) {}
+        fn draw(&mut self,_:&mut DrawFrame<'_, '_,FixtureHost>) {}
+        fn links(&self,out:&mut Vec<super::super::screen::Link>) { out.push(CHROME_LINK); }
+    }
+    fn key(k:Key,edge:Edge,ms:u32)->InputEvent<u32> {
+        let mut ev=crate::fixture::key(k,tick(ms));
+        if let InputKind::Key { edge:e,.. }=&mut ev.kind { *e=edge; }
+        ev
+    }
+    fn rig()->(Dispatcher<FixtureHost>,FixtureRig,Rc<Counts>) {
+        let mut d=Dispatcher::new(); let mut rig=FixtureRig::new();
+        d.request(MachineId::Nav,NavOp::Root(FixtureArg::Home));
+        d.frame_with(&mut rig,tick(0),vec![],vec![],&mut NoTap,false);
+        let entry=d.owner_entry().unwrap();
+        let counts=Rc::new(Counts::default());
+        d.nav.entry_mut(entry).unwrap().inst.as_mut().unwrap().screen=Box::new(ChromeScreen {
+            page:LinkedChrome::new(entry),counts:counts.clone() });
+        d.set_focus_in(Some(FocusKey{entry,elem:1000}),Some(GroupId(1)));
+        (d,rig,counts)
+    }
+    fn frame(d:&mut Dispatcher<FixtureHost>,rig:&mut FixtureRig,ms:u32,inputs:Vec<InputEvent<u32>>,tap:&mut dyn Tap<FixtureHost>) {
+        d.frame_with(rig,tick(ms),inputs,vec![],tap,false);
+    }
+
+    #[test]
+    fn early_ok_and_pointer_cancel_wait() {
+        let _serial=plx_base::testlock::serial();
+        for pointer in [false,true] {
+            for queued in [false,true] {
+                let (mut d,mut r,counts)=rig();
+                let down=key(Key::Down,Edge::Down,16);
+                if !queued { frame(&mut d,&mut r,16,vec![down.clone()],&mut NoTap); }
+                let mut inputs=if queued {vec![down]}else{vec![]};
+                inputs.push(if pointer {InputEvent {at:tick(32),source:plx_machine::machine::Source::Script,
+                    kind:InputKind::Pointer{x:1800.0,y:1000.0,hit:None}}} else {key(Key::Ok,Edge::Down,32)});
+                inputs.extend([key(Key::Ok,Edge::Repeat,32),key(Key::Ok,Edge::Up,32)]);
+                frame(&mut d,&mut r,32,inputs,&mut NoTap);
+                assert!(d.input.engine.pending_link().is_none());
+                assert!(d.input.arm.is_none());
+                for ms in [100,200,500] {
+                    frame(&mut d,&mut r,ms,vec![key(Key::Ok,Edge::Repeat,ms),key(Key::Ok,Edge::Up,ms)],&mut NoTap);
+                }
+                assert_eq!(counts.raw_ok.get(),0,"early confirm must not reach raw fallback, pointer={pointer} queued={queued}");
+                assert_eq!(counts.commits.get(),0,"no delayed press");
+                assert_eq!(counts.landings.get(),0,"no delayed travel");
+                assert_eq!(d.focus().unwrap().elem,1000);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Tape { rows:Vec<(u8,FocusAnswer<u32>)>,at:usize,mode:Option<bool>,errors:Vec<&'static str> }
+    impl Tap<FixtureHost> for Tape {
+        fn resolution_mode(&self)->Option<bool>{self.mode}
+        fn resolution_active(&self)->bool{true}
+        fn resolution_error(&mut self,e:&'static str){self.errors.push(e);}
+        fn resolve_focus(&mut self,_:u64,phase:u8,_:EntryId,actual:Option<FocusAnswer<u32>>)->Option<FocusAnswer<u32>> {
+            if self.mode.is_some() {
+                let (p,answer)=self.rows[self.at]; self.at+=1; assert_eq!(phase,p);
+                if self.mode==Some(true) {assert_eq!(actual,Some(answer),"scratch must preserve pending travel");}
+                Some(answer)
+            } else { let a=actual.unwrap(); self.rows.push((phase,a)); Some(a) }
+        }
+    }
+    #[test]
+    fn linked_wait_recorded_answers_restore_scratch_and_land_once() {
+        let _serial=plx_base::testlock::serial();
+        let (mut d,mut r,counts)=rig(); let mut tape=Tape::default();
+        for (ms,inputs) in [(16,vec![key(Key::Down,Edge::Down,16)]),(32,vec![key(Key::Down,Edge::Repeat,32)]),(100,vec![]),(200,vec![])] {
+            frame(&mut d,&mut r,ms,inputs,&mut tape);
+        }
+        assert!(tape.errors.is_empty(),"{:?}",tape.errors);
+        assert!(tape.rows.iter().any(|(_,a)|a.pending.is_some()));
+        assert_eq!(counts.landings.get(),1);
+        for resolve in [false,true] {
+            let (mut d,mut r,counts)=rig();
+            let mut replay=Tape{rows:tape.rows.clone(),mode:Some(resolve),..Default::default()};
+            for (ms,inputs) in [(16,vec![key(Key::Down,Edge::Down,16)]),(32,vec![key(Key::Down,Edge::Repeat,32)]),(100,vec![]),(200,vec![])] {
+                frame(&mut d,&mut r,ms,inputs,&mut replay);
+            }
+            assert!(replay.errors.is_empty(),"{:?}",replay.errors);
+            assert_eq!(counts.landings.get(),1);
+            assert!(d.input.engine.pending_link().is_none());
+        }
     }
 }

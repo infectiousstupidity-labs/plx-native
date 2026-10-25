@@ -50,7 +50,16 @@ pub enum Outcome<K> {
 
 /// The current key per input scope plus every group's remembered cursor — logical state
 /// (hashed, restored, recorded). Explicitly ordered sequences, never a map (§5.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkWait<K> {
+    pub owner: InputOwner,
+    pub source: FocusKey<K>,
+    pub link: Link,
+}
+
 pub struct FocusEngine<K> {
+    /// One transient declared travel intent, never another current/remembered cursor.
+    link_wait: Option<LinkWait<K>>,
     scopes: Vec<(InputOwner, FocusKey<K>, Option<GroupId>)>,
     remembered: Vec<((EntryId, GroupId), K)>,
     /// Derived read projections; canonical state remains the ordered memory above.
@@ -69,6 +78,7 @@ impl<K: Copy + Eq + Hash> Default for FocusEngine<K> {
 impl<K: Copy + Eq + Hash> FocusEngine<K> {
     pub fn new() -> Self {
         Self {
+            link_wait: None,
             scopes: Vec::new(),
             remembered: Vec::new(),
             read_snapshots: Vec::new(),
@@ -76,6 +86,14 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
             fell_back: false,
         }
     }
+
+    pub fn pending_link(&self) -> Option<LinkWait<K>> { self.link_wait }
+
+    /// Explicit intent and ownership changes revoke travel, even when the cursor is unchanged.
+    pub fn cancel_link_wait(&mut self) { self.link_wait = None; }
+
+    /// Replay continuation only; the dispatcher validates the complete answer before installation.
+    pub fn restore_link_wait(&mut self, pending: Option<LinkWait<K>>) { self.link_wait = pending; }
 
     /// The current focus of a scope.
     pub fn current(&self, owner: InputOwner) -> Option<FocusKey<K>> {
@@ -151,6 +169,7 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
     /// Park focus (a pointer hover, a restore, a reconcile): the engine records it and answers
     /// the move for the owner to act on. `group` is the key's group when known (remembered).
     pub fn set(&mut self, owner: InputOwner, key: FocusKey<K>, group: Option<GroupId>, by: By) -> Outcome<K> {
+        self.cancel_link_wait();
         let from = self.current(owner);
         if from == Some(key) {
             return Outcome::Nothing;
@@ -170,11 +189,13 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
 
     /// Drop a scope's current focus (a replay feeding "no focus").
     pub fn clear(&mut self, owner: InputOwner) {
+        self.cancel_link_wait();
         self.scopes.retain(|(o, _, _)| *o != owner);
     }
 
     /// An entry left for good: its scope and cursors go with it.
     pub fn forget(&mut self, entry: EntryId) {
+        self.cancel_link_wait();
         self.scopes
             .retain(|(o, k, _)| !(k.entry == entry || *o == InputOwner::Entry(entry)));
         self.remembered.retain(|((e, _), _)| *e != entry);
@@ -192,6 +213,7 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
         restored: Option<FocusKey<K>>,
         cx: &Cx<'_, H>,
     ) -> Outcome<K> {
+        self.cancel_link_wait();
         let mut groups = Vec::new();
         f.groups(cx, &mut groups);
         let (key, by) = match (restored, target) {
@@ -332,6 +354,7 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
         dir: Dir,
         cx: &Cx<'_, H>,
     ) -> Outcome<K> {
+        self.cancel_link_wait();
         let mut groups = Vec::new();
         f.groups(cx, &mut groups);
         let Some(cur) = self.current(owner) else {
@@ -362,6 +385,11 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
                 let key = self.seat_in(f, &groups, spec, from, Some(dir), cx);
                 return self.set(owner, key, Some(spec.id), By::Dir);
             }
+            let pending = LinkWait { owner, source: cur, link: *l };
+            if self.valid_link_wait(pending, owner, f, links, cx) && f.link_wait(*l, cx) {
+                self.link_wait = Some(pending);
+                return Outcome::Nothing;
+            }
         }
         // …else the group's edge rule for that side
         let Some(cur_spec) = groups.iter().find(|s| s.id == cur_group) else {
@@ -387,6 +415,32 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
     /// After a landing and before draw (§7.3 step 6): the owner's pure `reconcile` on the
     /// current key; a different answer is a `Reconcile` move.
     pub fn reconcile<H: Host<Elem = K>>(&mut self, owner: InputOwner, f: &dyn Focusable<H>, cx: &Cx<'_, H>) -> Outcome<K> {
+        self.reconcile_linked(owner, f, &[], cx)
+    }
+
+    /// Reconcile through the owner's actual declarations. The legacy wrapper has no links and
+    /// therefore revokes pending travel. No polling/frame request is introduced here.
+    pub fn reconcile_linked<H: Host<Elem = K>>(&mut self, owner: InputOwner, f: &dyn Focusable<H>,
+        links: &[Link], cx: &Cx<'_, H>) -> Outcome<K> {
+        if let Some(pending) = self.link_wait {
+            if self.valid_link_wait(pending, owner, f, links, cx) {
+                let mut groups = Vec::new();
+                f.groups(cx, &mut groups);
+                if let Some(spec) = groups.iter().find(|s| s.id == pending.link.to && s.len > 0) {
+                    self.cancel_link_wait();
+                    let from = f.place(&pending.source.elem, cx, At::SpringTarget).unwrap();
+                    let key = self.seat_in(f, &groups, spec, from, Some(pending.link.dir), cx);
+                    // A continuation may land only on a real member of this entry and group.
+                    if key.entry == pending.source.entry && f.group_of(&key.elem, cx) == Some(spec.id)
+                        && f.place(&key.elem, cx, At::SpringTarget).is_some() {
+                        return self.set(owner, key, Some(spec.id), By::Reconcile);
+                    }
+                } else if f.link_wait(pending.link, cx) {
+                    return Outcome::Nothing;
+                }
+            }
+            self.cancel_link_wait();
+        }
         let Some(cur) = self.current(owner) else {
             return Outcome::Nothing;
         };
@@ -396,6 +450,20 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
         }
         let group = f.group_of(&want.elem, cx);
         self.set(owner, want, group, By::Reconcile)
+    }
+
+    /// Structural validity, separate from the temporary presentation opt-in: a ready group
+    /// completes travel even though the owner no longer asks to wait for it.
+    pub fn valid_link_wait<H: Host<Elem = K>>(&self, pending: LinkWait<K>, owner: InputOwner,
+        f: &dyn Focusable<H>, links: &[Link], cx: &Cx<'_, H>) -> bool {
+        let mut groups = Vec::new();
+        f.groups(cx, &mut groups);
+        pending.owner == owner && owner == InputOwner::Entry(pending.source.entry)
+            && self.current(owner) == Some(pending.source) && links.contains(&pending.link)
+            && f.reconcile(pending.source, cx) == pending.source
+            && f.group_of(&pending.source.elem, cx) == Some(pending.link.from)
+            && groups.iter().any(|g| g.id == pending.link.from && g.len > 0)
+            && f.place(&pending.source.elem, cx, At::SpringTarget).is_some()
     }
 
     /// The element kind of the current focus's group (§7.4): what OK arms.
@@ -439,6 +507,15 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
             c.u32(e.0).u32(g.0);
             elem(k, c);
         }
+        c.option(self.link_wait, |c, pending| {
+            match pending.owner {
+                InputOwner::Entry(e) => c.discriminant(0).u32(e.0),
+                InputOwner::System(_) => c.discriminant(1),
+            };
+            c.u32(pending.source.entry.0);
+            elem(&pending.source.elem, c);
+            c.u32(pending.link.from.0).u32(side(pending.link.dir) as u32).u32(pending.link.to.0);
+        });
     }
 }
 
@@ -621,6 +698,38 @@ pub mod tree {
         }
     }
 
+    pub struct LinkedChrome { pub tree: Tree, pub ready: bool, pub eligible: bool, pub seat_override: Option<FocusKey<u32>> }
+    impl LinkedChrome {
+        pub fn new(entry: EntryId) -> Self {
+            let mut tree = Tree::new(entry);
+            tree.row(1, 1, 0.0, 0.0, 64.0, 64.0, 64.0).spec.edge = [EdgeRule::Stop; 4];
+            let dest = tree.row(2, 3, 0.0, 100.0, 64.0, 64.0, 80.0);
+            dest.spec.seat = Seat::Remembered;
+            dest.spec.elem = ElemKind::Control;
+            Self { tree, ready: false, eligible: true, seat_override: None }
+        }
+    }
+    pub const CHROME_LINK: Link = Link { from: GroupId(1), dir: Dir::Down, to: GroupId(2) };
+    impl Focusable<FixtureHost> for LinkedChrome {
+        fn link_wait(&self, link: Link, _: &Cx<'_, FixtureHost>) -> bool {
+            link == CHROME_LINK && self.eligible && !self.ready
+        }
+        fn groups(&self, cx: &Cx<'_, FixtureHost>, out: &mut Vec<GroupSpec>) {
+            self.tree.groups(cx, out);
+            if !self.ready || !self.eligible { out.retain(|g| g.id != GroupId(2)); }
+        }
+        fn group_of(&self, k: &u32, cx: &Cx<'_, FixtureHost>) -> Option<GroupId> {
+            let g = self.tree.group_of(k, cx)?;
+            (g != GroupId(2) || (self.ready && self.eligible)).then_some(g)
+        }
+        fn neighbour(&self, k: FocusKey<u32>, d: Dir, cx: &Cx<'_, FixtureHost>) -> Step<u32> { self.tree.neighbour(k, d, cx) }
+        fn place(&self, k: &u32, cx: &Cx<'_, FixtureHost>, at: At) -> Option<Placed> {
+            self.group_of(k, cx)?; self.tree.place(k, cx, at)
+        }
+        fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.seat_override.unwrap_or_else(|| self.tree.seat(g, from, cx)) }
+        fn reconcile(&self, k: FocusKey<u32>, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.tree.reconcile(k, cx) }
+    }
+
     impl Focusable<FixtureHost> for Tree {
         fn groups(&self, _cx: &Cx<'_, FixtureHost>, out: &mut Vec<GroupSpec>) {
             out.extend(self.groups.iter().map(|g| g.spec));
@@ -788,7 +897,7 @@ pub mod tree {
 
 #[cfg(test)]
 mod tests {
-    use super::tree::{key, split, Tree};
+    use super::tree::{key, split, Tree, LinkedChrome, CHROME_LINK};
     use super::*;
     use crate::fixture::{FixtureHost, FixtureMeasure, FixtureView, FixtureViews};
     use plx_machine::machine::{Cx, FocusRead, PressRead, Tick};
@@ -816,52 +925,97 @@ mod tests {
         };
     }
 
-    struct LinkedChrome { tree: Tree, ready: bool, eligible: bool }
-    impl LinkedChrome {
-        fn new() -> Self {
-            let mut tree = Tree::new(E);
-            tree.row(1, 1, 0.0, 0.0, 64.0, 64.0, 64.0).spec.edge = [EdgeRule::Stop; 4];
-            let dest = tree.row(2, 3, 0.0, 100.0, 64.0, 64.0, 80.0);
-            dest.spec.seat = Seat::Remembered;
-            dest.spec.elem = ElemKind::Control;
-            Self { tree, ready: false, eligible: true }
-        }
-    }
-    const CHROME_LINK: Link = Link { from: GroupId(1), dir: Dir::Down, to: GroupId(2) };
-    impl Focusable<FixtureHost> for LinkedChrome {
-        fn link_wait(&self, link: Link, _: &Cx<'_, FixtureHost>) -> bool {
-            link == CHROME_LINK && self.eligible && !self.ready
-        }
-        fn groups(&self, cx: &Cx<'_, FixtureHost>, out: &mut Vec<GroupSpec>) {
-            self.tree.groups(cx, out);
-            if !self.ready || !self.eligible { out.retain(|g| g.id != GroupId(2)); }
-        }
-        fn group_of(&self, k: &u32, cx: &Cx<'_, FixtureHost>) -> Option<GroupId> {
-            let g = self.tree.group_of(k, cx)?;
-            (g != GroupId(2) || (self.ready && self.eligible)).then_some(g)
-        }
-        fn neighbour(&self, k: FocusKey<u32>, d: Dir, cx: &Cx<'_, FixtureHost>) -> Step<u32> { self.tree.neighbour(k, d, cx) }
-        fn place(&self, k: &u32, cx: &Cx<'_, FixtureHost>, at: At) -> Option<Placed> {
-            self.group_of(k, cx)?; self.tree.place(k, cx, at)
-        }
-        fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.tree.seat(g, from, cx) }
-        fn reconcile(&self, k: FocusKey<u32>, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.tree.reconcile(k, cx) }
-    }
-
     #[test]
     fn linked_chrome_wait_retries_once() {
         rig!(m, v, cx);
-        let mut page = LinkedChrome::new();
+        let mut page = LinkedChrome::new(E);
         let mut engine = FocusEngine::new();
         engine.set(OWNER, key(E, 2, 2), Some(GroupId(2)), By::Restore);
         engine.set(OWNER, key(E, 1, 0), Some(GroupId(1)), By::Restore);
         assert_eq!(engine.move_dir(OWNER, &page, &[CHROME_LINK], Dir::Down, &cx), Outcome::Nothing);
         assert!(page.place(&2002, &cx, At::Drawn).is_none(), "no hidden control");
-        assert_eq!(engine.reconcile(OWNER, &page, &cx), Outcome::Nothing);
+        assert_eq!(engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx), Outcome::Nothing);
         page.ready = true;
-        assert!(matches!(engine.reconcile(OWNER, &page, &cx), Outcome::Moved { to, .. } if to == key(E, 2, 2)),
+        assert!(matches!(engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx), Outcome::Moved { to, .. } if to == key(E, 2, 2)),
             "the original declared link must land on its real remembered member after restoration");
-        assert_eq!(engine.reconcile(OWNER, &page, &cx), Outcome::Nothing, "one landing only");
+        assert_eq!(engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx), Outcome::Nothing, "one landing only");
+    }
+
+    #[test]
+    fn linked_wait_cancellation_matrix() {
+        rig!(m, v, cx);
+        for case in 0..12 {
+            let mut page = LinkedChrome::new(E);
+            let mut engine = FocusEngine::new();
+            let source = key(E, 1, 0);
+            engine.set(OWNER, source, Some(GroupId(1)), By::Restore);
+            engine.move_dir(OWNER, &page, &[CHROME_LINK], Dir::Down, &cx);
+            assert!(engine.pending_link().is_some(), "case {case}: real wait premise");
+            match case {
+                0 => { engine.set(OWNER, source, Some(GroupId(1)), By::Restore); }
+                1 => { engine.enter(OWNER, &page, FocusTarget::Elem(source), None, &cx); }
+                2 => engine.clear(OWNER),
+                3 => engine.forget(E),
+                4 => { engine.move_dir(OWNER, &page, &[CHROME_LINK], Dir::Right, &cx); }
+                5 => { page.eligible = false; engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx); }
+                6 => { engine.reconcile_linked(OWNER, &page, &[], &cx); }
+                7 => { engine.reconcile(OWNER, &page, &cx); }
+                8 => { engine.reconcile_linked(InputOwner::Entry(EntryId(99)), &page, &[CHROME_LINK], &cx); }
+                9 => { page.tree.groups[0].promote.push((1000,1001)); engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx); }
+                10 => { page.tree.groups.remove(0); engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx); }
+                _ => engine.cancel_link_wait(),
+            }
+            assert!(engine.pending_link().is_none(), "case {case}: revoked");
+            let current = engine.current(OWNER);
+            page.ready = true; page.eligible = true;
+            engine.reconcile_linked(OWNER, &page, &[CHROME_LINK], &cx);
+            assert!(engine.current(OWNER).is_none_or(|k| k.elem/1000 != 2), "case {case}: no later unrelated landing: {current:?}");
+        }
+    }
+
+    #[test]
+    fn linked_wait_requires_declaration_opt_in_and_exact_entry_group_member() {
+        rig!(m, v, cx);
+        for case in 0..6 {
+            let mut page = LinkedChrome::new(E);
+            let mut engine = FocusEngine::new();
+            engine.set(OWNER, key(E,1,0), Some(GroupId(1)), By::Restore);
+            if case == 0 { page.eligible = false; }
+            let links = if case == 1 { &[][..] } else { &[CHROME_LINK][..] };
+            engine.move_dir(OWNER, &page, links, Dir::Down, &cx);
+            assert_eq!(engine.pending_link().is_some(), case > 1);
+            page.ready = true;
+            page.seat_override = match case {
+                2 => Some(key(EntryId(99),2,0)), // sibling entry
+                3 => Some(key(E,1,0)), // source group
+                4 => Some(key(E,2,99)), // absent member
+                _ => None,
+            };
+            engine.reconcile_linked(OWNER, &page, links, &cx);
+            assert_eq!(engine.current(OWNER), Some(key(E,if case==5 {2}else{1},0)));
+            assert!(engine.pending_link().is_none());
+        }
+        // The ordinary Tree does not opt in, even with exactly the same declared door.
+        let mut tree = Tree::new(E);
+        tree.row(1,1,0.0,0.0,64.0,64.0,64.0).spec.edge = [EdgeRule::Stop;4];
+        let mut engine = FocusEngine::new();
+        engine.set(OWNER,key(E,1,0),Some(GroupId(1)),By::Restore);
+        engine.move_dir(OWNER,&tree,&[CHROME_LINK],Dir::Down,&cx);
+        assert!(engine.pending_link().is_none());
+    }
+
+    #[test]
+    fn linked_wait_is_canonical_not_an_unhashed_cursor() {
+        rig!(m, v, cx);
+        let page = LinkedChrome::new(E);
+        let mut engine = FocusEngine::new();
+        engine.set(OWNER,key(E,1,0),Some(GroupId(1)),By::Restore);
+        let hash = |e: &FocusEngine<u32>| { let mut c=Canon::new(); e.write_with(&mut c,&|k,c|{c.u32(*k);}); c.finish() };
+        let before = hash(&engine);
+        engine.move_dir(OWNER,&page,&[CHROME_LINK],Dir::Down,&cx);
+        assert_ne!(hash(&engine),before,"same focus/memory but a pending link must change canon");
+        engine.cancel_link_wait();
+        assert_eq!(hash(&engine),before);
     }
 
     /// The fixture trees of §7.7.

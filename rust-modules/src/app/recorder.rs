@@ -164,7 +164,7 @@ const APP_SHAPES: &[&str] = &[
 /// Product wire compatibility joins the existing TextInputWire/content codec census. The
 /// generic frame envelope is schema 3; product recordings without ordered resolutions and
 /// canonical final focus must be refused before parsing/boot, including Targets mode.
-const RESOLUTION_SHAPE: &str = "ProductResolutionV1{fo:Option<(entry:u32,elem:u32,group:Option<u32>)>,rs:ordered<Focus{phase:u8,entry:u32,focus:Option<(u32,u32)>,group:Option<u32>,outcome:u8,from:Option<(u32,u32)>,to:Option<(u32,u32)>,by:u8}|Hit{phase:u8,entry:Option<u32>,hit:Option<(u32,u32)>,focus:Option<(u32,u32)>,activate:Option<((u32,u32),u8)>,miss:bool}>,input:post-hit,metrics:Width(bytes,i32,bool)|Cap(i32)|Line(i32)->f32bits}";
+const RESOLUTION_SHAPE: &str = "ProductResolutionV2{fo:Option<(entry:u32,elem:u32,group:Option<u32>)>,rs:ordered<Focus{phase:u8,entry:u32,focus:Option<(u32,u32)>,group:Option<u32>,pending:Option<(owner_entry:u32,source:(u32,u32),from:u32,dir:u8,to:u32)>,outcome:u8,from:Option<(u32,u32)>,to:Option<(u32,u32)>,by:u8}|Hit{phase:u8,entry:Option<u32>,hit:Option<(u32,u32)>,focus:Option<(u32,u32)>,activate:Option<((u32,u32),u8)>,miss:bool}>,input:post-hit,metrics:Width(bytes,i32,bool)|Cap(i32)|Line(i32)->f32bits}";
 
 /// The state SHAPE of the product hash: bump by changing a `SHAPE` string, never silently.
 ///
@@ -301,10 +301,11 @@ struct ResolutionReplay {
 }
 
 type WireKey = (u32, u32);
+type WireLinkWait = (u32, WireKey, u32, u8, u32);
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
 #[serde(tag="kind", deny_unknown_fields)]
 enum ResolutionWire {
-    Focus { phase: u8, entry: u32, focus: Option<WireKey>, group: Option<u32>,
+    Focus { phase: u8, entry: u32, focus: Option<WireKey>, group: Option<u32>, pending: Option<WireLinkWait>,
         outcome: u8, from: Option<WireKey>, to: Option<WireKey>, by: u8 },
     Hit { phase: u8, entry: Option<u32>, hit: Option<WireKey>, focus: Option<WireKey>,
         activate: Option<(WireKey, u8)>, miss: bool },
@@ -331,12 +332,17 @@ impl ResolutionWire {
                 EdgeRule::Screen=>4, EdgeRule::Nav(NavOpKind::Back)=>5, EdgeRule::Nav(NavOpKind::Dismiss)=>6 },None,None,0),
         };
         Self::Focus { phase, entry:entry.0, focus:answer.focus.map(wire_key), group:answer.group.map(|g|g.0),
-            outcome, from, to, by }
+            pending:answer.pending.map(|p| {
+                let plx_machine::machine::InputOwner::Entry(owner) = p.owner else { unreachable!("validated entry wait") };
+                (owner.0, wire_key(p.source), p.link.from.0,
+                    match p.link.dir { plx_ui::screen::Dir::Up=>0,plx_ui::screen::Dir::Down=>1,
+                        plx_ui::screen::Dir::Left=>2,plx_ui::screen::Dir::Right=>3 },p.link.to.0)
+            }), outcome, from, to, by }
     }
     fn focus_answer(&self) -> Result<plx_ui::dispatch::FocusAnswer<u32>, &'static str> {
         use plx_ui::{focus::Outcome, screen::{By, EdgeRule}};
         use plx_machine::{machine::{NavOpKind, GroupId}};
-        let Self::Focus { phase, entry, focus, group, outcome, from, to, by } = *self else { return Err("wrong resolution family"); };
+        let Self::Focus { phase, entry, focus, group, pending, outcome, from, to, by } = *self else { return Err("wrong resolution family"); };
         if phase > 2 || entry == 0 || [focus,from,to].into_iter().flatten().any(|k| k.0 != entry)
             || (focus.is_none() && group.is_some()) { return Err("invalid focus identity"); }
         let outcome = match outcome {
@@ -354,7 +360,18 @@ impl ResolutionWire {
             },
             _ => return Err("invalid focus outcome"),
         };
-        Ok(plx_ui::dispatch::FocusAnswer { outcome, focus:focus.map(focus_key), group:group.map(GroupId) })
+        let pending = pending.map(|(owner,source,from,dir,to)| {
+            use plx_ui::screen::{Dir,Link};
+            if phase == 0 || owner != entry || source.0 != entry || Some(source) != focus
+                || group != Some(from) || from == to || !matches!(outcome,Outcome::Nothing) {
+                return Err("invalid linked wait identity");
+            }
+            let dir = match dir { 0=>Dir::Up,1=>Dir::Down,2=>Dir::Left,3=>Dir::Right,
+                _=>return Err("invalid linked wait direction") };
+            Ok(plx_ui::focus::LinkWait { owner:plx_machine::machine::InputOwner::Entry(plx_machine::machine::EntryId(owner)),
+                source:focus_key(source),link:Link { from:GroupId(from),dir,to:GroupId(to) } })
+        }).transpose()?;
+        Ok(plx_ui::dispatch::FocusAnswer { outcome, focus:focus.map(focus_key), group:group.map(GroupId), pending })
     }
     fn hit(phase: u8, entry: Option<plx_machine::machine::EntryId>, answer: plx_ui::hit::Resolution<u32>) -> Self {
         use plx_ui::screen::Activate;
