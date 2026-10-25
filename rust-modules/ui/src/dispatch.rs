@@ -2139,6 +2139,27 @@ where
                     report.dropped_deliveries += 1;
                     return;
                 }
+                if self.input.engine.pending_link().is_some_and(|p| p.owner != self.owner()) {
+                    self.input.engine.cancel_link_wait();
+                }
+                if self.input.engine.pending_link().is_some() {
+                    match &ev {
+                        ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, edge, .. }, .. }) => {
+                            if *key == Key::Ok {
+                                self.input.engine.cancel_link_wait();
+                                self.input.cancel_press();
+                                return; // before the source screen's raw confirm fallback
+                            }
+                            if *edge == Edge::Repeat { return; }
+                            if *edge == Edge::Down { self.input.engine.cancel_link_wait(); }
+                        }
+                        ScreenEvent::Input(_) | ScreenEvent::Activate(_) | ScreenEvent::Enter(_)
+                        | ScreenEvent::WillLeave(_) | ScreenEvent::Cover | ScreenEvent::Unmount => {
+                            self.input.engine.cancel_link_wait();
+                        }
+                        _ => {}
+                    }
+                }
                 // Ingest releases an already-live gesture before the press Tick. A Down in
                 // THIS input batch creates its arm later, while draining, so apply subsequent
                 // physical edges in delivery order too. These operations are idempotent for

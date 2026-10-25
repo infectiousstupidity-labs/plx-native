@@ -1384,6 +1384,102 @@ mod tests {
             "startup abort must disarm its own owner gate too");
     }
 
+    const PRE_LINK_WAIT_INPUT_SHAPE: &str = "InputMachine{press:Press,engine:FocusEngine{scopes:[(InputOwner{Entry(u32),System},FocusKey{entry:u32,elem:ElemIndex},Option<GroupId>)],remembered:[(EntryId,GroupId,ElemIndex)]},keyboard:bool,keyboard_owner:Option<InstanceId(u32)>,next_press:u32,arm:Option<Arm{id:u32,key:{entry:u32,elem:ElemIndex},from:PressFrom{Key,Pointer},holdable:bool,owner:MachineId{Session,Consent,Input,Present,Nav,Player,Store(u32),Instance(u32),Cache},held_delivered:bool}>};DispatcherQueue:[{press:Option<{from:MachineId,to:MachineId,id:u32,key:{entry:u32,elem:ElemIndex},held:bool}>,input:Option<{from:MachineId,to:MachineId,event:{tick:{ms:u32,dt_us:u32},source:{Sdl,RemoteFifo,Script,Replay},kind:{Key{key:{Up,Down,Left,Right,Ok,Back,Other},sym:u32,wcode:u32,edge:{Down,Repeat,Up},at_edge:bool},Pointer{x:f32,y:f32,hit:Option<ElemIndex>},Click{x:f32,y:f32,hit:Option<ElemIndex>},Drag{x:f32,y:f32,hit:Option<ElemIndex>},Wheel{dy:f32},Text{Commit(str),Backspace,Clear,Left,Right},PointerHidden,SystemKeyboard(bool)}}}>,keyboard_request:Option<{from:MachineId,to:MachineId,up:bool}>}]";
+    const PRE_LINK_WAIT_RESOLUTION_SHAPE: &str = "ProductResolutionV1{fo:Option<(entry:u32,elem:u32,group:Option<u32>)>,rs:ordered<Focus{phase:u8,entry:u32,focus:Option<(u32,u32)>,group:Option<u32>,outcome:u8,from:Option<(u32,u32)>,to:Option<(u32,u32)>,by:u8}|Hit{phase:u8,entry:Option<u32>,hit:Option<(u32,u32)>,focus:Option<(u32,u32)>,activate:Option<((u32,u32),u8)>,miss:bool}>,input:post-hit,metrics:Width(bytes,i32,bool)|Cap(i32)|Line(i32)->f32bits}";
+
+    #[test]
+    fn recorded_wait_roundtrip() {
+        use plx_ui::{dispatch::{FocusAnswer,Tap},focus::FocusEngine,focus::tree::{LinkedChrome,CHROME_LINK},
+            fixture::{FixtureHost,FixtureMeasure,FixtureView,FixtureViews},screen::{By,Dir}};
+        use plx_machine::machine::{Cx,EntryId,FocusKey,FocusRead,GroupId,InputOwner,PressRead,Tick};
+        let _serial=plx_base::testlock::serial();
+        let entry=EntryId(1); let owner=InputOwner::Entry(entry);
+        let measure=FixtureMeasure; let store=FixtureView::default();
+        let cx=Cx::<FixtureHost>{views:FixtureViews{store:&store},tick:Tick::default(),measure:&measure,
+            press:PressRead::default(),focus:FocusRead::default(),owner};
+        let hash=|engine:&FocusEngine<u32>| { let mut c=Canon::new();engine.write_with(&mut c,&|k,c|{c.u32(*k);});c.finish() };
+        let initial=super::super::bootstrap::Initial::synthetic_home(1,32517,None).unwrap();
+        let sink=plx_ui::rec::MemSink::default(); let segments=sink.segments.clone();
+        let manifest=Header::new(state_fp(),&initial).to_json().to_string();
+        let mut rec=Recplay::recording_with_sink(&initial,Box::new(sink)).unwrap();
+        let mut engine=FocusEngine::new(); let mut page=LinkedChrome::new(entry);
+        engine.set(owner,FocusKey{entry,elem:1000},Some(GroupId(1)),By::Restore);
+        let mut hashes=Vec::new();
+        for f in 0..3 {
+            rec.tick(f*16,0.016); page.ready=f==2;
+            let phase=if f==0 {1}else{2};
+            let outcome=if f==0 {engine.move_dir(owner,&page,&[CHROME_LINK],Dir::Down,&cx)}
+                else {engine.reconcile_linked(owner,&page,&[CHROME_LINK],&cx)};
+            let answer=FocusAnswer{outcome,focus:engine.current(owner),group:engine.current_group(owner),pending:engine.pending_link()};
+            assert_eq!(answer.pending.is_some(),f<2);
+            assert_eq!(Tap::<Product>::resolve_focus(&mut rec,1,phase,entry,Some(answer)),Some(answer));
+            Tap::<Product>::focus(&mut rec,1,answer.focus.map(|k|(k.entry.0,k.elem,answer.group.map(|g|g.0))));
+            hashes.push(hash(&engine)); rec.end_frame(&||hash(&engine));
+        }
+        rec.finish(plx_machine::landgate::fixture_gate());
+        let recording=Recording::parse(&manifest,&segments.borrow().iter().map(Vec::as_slice).collect::<Vec<_>>(),state_fp()).unwrap();
+        validate_resolution_recording(&recording).unwrap();
+        assert_ne!(hashes[0],hashes[2]);
+        assert_eq!(recording.frames[0].resolutions[0]["payload"]["pending"],json!([1,[1,1000],1,1,2]));
+        for mode in [ReplayMode::Targets,ReplayMode::Resolve] {
+            let mut replay=replay_for_test(copy_recording(&recording),mode);
+            let mut engine=FocusEngine::new(); let mut page=LinkedChrome::new(entry);
+            engine.set(owner,FocusKey{entry,elem:1000},Some(GroupId(1)),By::Restore);
+            for f in 0..3 {
+                replay.tick(f*16,0.016); page.ready=f==2;
+                let phase=if f==0 {1}else{2};
+                let actual=if mode==ReplayMode::Resolve {
+                    let outcome=if f==0 {engine.move_dir(owner,&page,&[CHROME_LINK],Dir::Down,&cx)}
+                        else {engine.reconcile_linked(owner,&page,&[CHROME_LINK],&cx)};
+                    Some(FocusAnswer{outcome,focus:engine.current(owner),group:engine.current_group(owner),pending:engine.pending_link()})
+                } else {None};
+                let answer=Tap::<Product>::resolve_focus(&mut replay,1,phase,entry,actual).unwrap();
+                engine.set(owner,answer.focus.unwrap(),answer.group,By::Restore);
+                engine.restore_link_wait(answer.pending);
+                assert_eq!(hash(&engine),hashes[f as usize],"complete continuation, {mode:?} frame {f}");
+                Tap::<Product>::focus(&mut replay,1,answer.focus.map(|k|(k.entry.0,k.elem,answer.group.map(|g|g.0))));
+                replay.end_frame(&||hash(&engine));
+            }
+            let Recplay::Replaying(r)=replay else {unreachable!()};
+            assert!(r.same(),"wait roundtrip {mode:?}: {:?}",r.failure);
+        }
+        // Strict wire refuses omission and malformed continuations, never silently drops them.
+        let payload=recording.frames[0].resolutions[0]["payload"].clone();
+        for case in 0..7 {
+            let mut v=payload.clone();
+            match case {
+                0=>{v.as_object_mut().unwrap().remove("pending");},
+                1=>v["pending"][0]=json!(99),
+                2=>v["pending"][1][0]=json!(99),
+                3=>v["pending"][1][1]=json!(1001),
+                4=>v["pending"][2]=json!(3),
+                5=>v["pending"][3]=json!(4),
+                _=>v["pending"][4]=json!(1),
+            }
+            assert!(ResolutionWire::decode(v).is_err(),"case {case}");
+        }
+    }
+
+    #[test]
+    fn legacy_no_pending_product_wire_is_refused_before_boot_in_both_modes() {
+        let mut before=APP_SHAPES.to_vec(); before[1]=PRE_LINK_WAIT_INPUT_SHAPE;
+        before.push(super::super::bootstrap::CONTENT_SHAPE);
+        before.push(PRE_LINK_WAIT_RESOLUTION_SHAPE);
+        before.push("CaptureReadinessV2{before_dispatch:pending:bool,text:bool}");
+        before.push("MeasurementV1{query:Width(text:bytes,sz:i32,bold:bool)|Cap(sz:i32)|Line(sz:i32),answer:f32bits:u32}");
+        before.extend_from_slice(plx_screens::registry::SCREEN_SHAPES);
+        let old=plx_ui::rec::state_fp(&before);
+        assert_ne!(old,state_fp());
+        for mode in ["targets","resolve"] {
+            let (selected,_)=ReplayMode::parse(&format!("v1\n{mode}\n/unused-recording")).unwrap();
+            assert_eq!(selected,if mode=="targets" {ReplayMode::Targets}else{ReplayMode::Resolve});
+            // Deliberately no initial payload or segments: the same parser called by preflight
+            // rejects shape BEFORE attempting either, independently of the selected algorithm.
+            let manifest=json!({"schema":plx_ui::rec::SCHEMA,"state_fp":old}).to_string();
+            assert_eq!(Recording::parse(&manifest,&[],state_fp()).err(),Some(RecError::StateShape{theirs:old,ours:state_fp()}));
+        }
+    }
+
     #[test]
     fn product_pre_resolution_wire_shape_is_refused_before_boot() {
         let mut before=APP_SHAPES.to_vec();
@@ -2614,6 +2710,7 @@ mod tests {
         // `child_count`; they are history, so they keep the record they were computed with.
         const PRE_CHILD_COUNT_RECORD_SHAPE: &str = "HubsResultV1{gen:u32,seq:u32,sid:u16,client:Option<u32>,token_gen:u32,build:Option<{cw:[{last_viewed_at:i64,m:PmsMovie}],shelves:[{title:str,hub_id:str,key:str,items:[PmsMovie]}]}>};PmsMovie{sid:u16,sec:i64,title:str,year:i32,rating:str,dur_ns:i64,part:str,thumb:str,still:str,art:str,summary:str,rk:str,vcodec:str,acodec:str,blur:[[f32bits;3];4],has_blur:bool,kind:i32,resume_ms:i64,show_rk:str,season_index:i32,show_title:str,ep_index:i32,unwatched:bool,watched:bool,aired:str}";
         let mut pre_settings = APP_SHAPES.to_vec();
+        pre_settings[1] = PRE_LINK_WAIT_INPUT_SHAPE;
         let record = pre_settings.iter().position(|shape| *shape == plx_data::pms::record::SHAPE).unwrap();
         pre_settings[record] = PRE_CHILD_COUNT_RECORD_SHAPE;
         // ...and under the hubs initial state before a hub row carried its total.
