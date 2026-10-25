@@ -3893,6 +3893,18 @@ pub(crate) fn player(d: &Dispatcher<AppHost>) -> Option<&plx_screens::player::Pl
         .downcast_ref::<plx_screens::player::PlayerScreen>()
 }
 
+/// Queue typed player focus requests through the same Enter/effect path as screen requests.
+pub(crate) fn request_hud_focus(d: &mut Dispatcher<AppHost>, request: plx_screens::player::HudFocusRequest) {
+    let Some(entry) = d.nav.top_page() else { return };
+    let Some(instance) = entry.inst.as_ref().map(|i| i.id) else { return };
+    let Some(player) = player(d) else { return };
+    let keys: Vec<_> = player.request_hud_focus(request).collect();
+    for key in keys {
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance), Delivery::Screen(
+            ScreenEvent::Enter(plx_ui::screen::Enter::Fresh { focus: plx_ui::screen::FocusTarget::Elem(key) }))));
+    }
+}
+
 pub(crate) fn player_mut(
     d: &mut Dispatcher<AppHost>,
 ) -> Option<&mut plx_screens::player::PlayerScreen> {

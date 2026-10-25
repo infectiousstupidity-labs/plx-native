@@ -196,16 +196,7 @@ impl HudFocusSelection {
     pub fn on_tabs(self) -> bool { self.focus == 2 }
 }
 
-/// The player HUD's focus cursor: WHICH row owns focus, plus the index WITHIN each of the
-/// two indexed rows. One cursor, not three settings — the three are drawn together every
-/// frame (`draw_hud`), moved together by UP/DOWN, and, the reason they are bundled here,
-/// must be RESET together when a new playback session begins.
-///
-/// As three loose `plex_run` locals they were never reset at all: `start_playback` sets the
-/// route, the resume point and the HUD timer, but the focus cursor survived from the
-/// PREVIOUS session — leave one movie with the Subtitles button focused (`focus == 1`),
-/// start another, and the first OK opened the track menu instead of pausing. Bundling makes
-/// "reset the HUD focus" one assignment that `start_playback` cannot half-do.
+/// Legacy draw/recorder projection of the engine's current key and row memory. Never a cursor.
 #[derive(Clone, Copy)]
 pub(crate) struct HudNav {
     pub(crate) focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs
@@ -221,19 +212,19 @@ impl HudNav {
         tab: 0,
     };
 
-    pub(crate) fn apply_focus_request(&mut self, request: HudFocusRequest) {
-        match request {
-            HudFocusRequest::Home => *self = Self::HOME,
-            HudFocusRequest::Scrubber => self.focus = 0,
-            HudFocusRequest::SecondaryItem(item) => {
-                self.focus = 1;
-                self.btn = item;
-            }
-            HudFocusRequest::TabItem(item) => {
-                self.focus = 2;
-                self.tab = item;
+    pub(crate) fn from_engine(entry: plx_machine::machine::EntryId, read: &plx_machine::machine::FocusRead<u32>) -> Self {
+        use plx_appkit::player_hud::{ELEM_ROW_BASE, ELEM_TAB_BASE};
+        let mut nav = Self::HOME;
+        nav.btn = read.remembered(super::GROUP_ROW).unwrap_or(ELEM_ROW_BASE).saturating_sub(ELEM_ROW_BASE) as i32;
+        nav.tab = read.remembered(super::GROUP_TABS).unwrap_or(ELEM_TAB_BASE).saturating_sub(ELEM_TAB_BASE) as i32;
+        if let Some(key) = read.current.filter(|key| key.entry == entry) {
+            match key.elem {
+                e if (ELEM_ROW_BASE..ELEM_TAB_BASE).contains(&e) => { nav.focus = 1; nav.btn = (e - ELEM_ROW_BASE) as i32; }
+                e if (ELEM_TAB_BASE..plx_appkit::player_hud::ELEM_FAILURE_BASE).contains(&e) => { nav.focus = 2; nav.tab = (e - ELEM_TAB_BASE) as i32; }
+                _ => {}
             }
         }
+        nav
     }
 
     pub(crate) fn selection(self) -> HudFocusSelection {
@@ -419,10 +410,7 @@ impl HudState {
     pub fn raise_for_offer(&mut self, now: u32, primary: c_int) {
         self.extend(now, HUD_LINGER_MS);
         self.dismissed = false;
-        if self.nav.focus == 0 {
-            self.nav.focus = 1;
-            self.nav.btn = primary;
-        }
+        let _ = primary; // seating is an engine request from PlayerScreen::raise_for_offer
     }
 }
 // scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub stepping

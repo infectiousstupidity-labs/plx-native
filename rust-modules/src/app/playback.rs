@@ -600,9 +600,9 @@ pub(crate) fn player_requests(
                 }
             }
             PlayerReq::FocusTabs => {
-                if let Some(player) = super::bridge::player_mut(pages) {
+                if let Some(player) = super::bridge::player(pages) {
                     let tab = player.hud_focus().tab_item();
-                    player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(tab));
+                    super::bridge::request_hud_focus(pages, plx_screens::player::HudFocusRequest::TabItem(tab));
                 }
             }
             // The fall-through a surface cannot perform (`screens::player::overlay`'s module doc):

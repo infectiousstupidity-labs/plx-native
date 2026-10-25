@@ -731,10 +731,10 @@ unsafe fn ingress_token(app: &mut App, fr: &mut Frame, token: &str) -> bool {
 pub(crate) fn pin_headless_hud(app: &mut App, now: u32, tab: Option<i32>) {
     if let Some(player) = super::bridge::player_mut(&mut app.pages) {
         player.hud.extend(now, HUD_HEADLESS_MS);
-        if let Some(tab) = tab {
-            player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(tab));
-        }
         player.publish();
+    }
+    if let Some(tab) = tab {
+        super::bridge::request_hud_focus(&mut app.pages, plx_screens::player::HudFocusRequest::TabItem(tab));
     }
 }
 
@@ -1941,6 +1941,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // Focus follows the control row's OCCUPANT, on both edges. Driven by slot identity
         // rather than a "was something shown" bool, because the two edges have different jobs
         // and the previous bool implemented neither of the ones its comment promised.
+        let mut focus_request = None;
         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
             // Keyed on the SEGMENT, not the slot, and `last_offer` is only ever advanced to
             // a real offer — never cleared back to None. `active_marker` is gated on `is_playing`,
@@ -1963,7 +1964,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 // the DISMISSAL and the ring in one act, because raising the timer alone left
                 // the tile behind a transport nobody drew. `HudState::raise_for_offer` is where
                 // that rule, its resting-position clause and the bug are written down.
-                player.raise_for_offer(fr.now, fr.ctrl.primary_btn());
+                focus_request = player.raise_for_offer(fr.now, fr.ctrl.primary_btn());
             } else if plx_appkit::player_hud::standin_left_the_ring(
                 player.hud.was_standin,
                 fr.ctrl,
@@ -1975,58 +1976,18 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 // own focus-reset contract exists to kill. Strictly the EDGE: as a steady state it also
                 // fired on a user who walked UP to the discs on purpose, yanking the ring back
                 // the same frame and making OK on a disc unreachable by remote.
-                player.request_hud_focus(plx_screens::player::HudFocusRequest::Home);
+                focus_request = Some(plx_screens::player::HudFocusRequest::Home);
             }
             player.hud.was_standin = !fr.ctrl.is_discs();
             player.publish();
         }
-        // While the countdown runs, hold the HUD up — a timer nobody can see is a cut to the
-        // next episode out of nowhere. `hud.dismissed` has to clear with it, not just the
-        // timer: a user who UP-hid the HUD and then touched nothing until the credits still
-        // carries the dismissal, which BEATS `extend_hud` inside `hud_visible`, so the
-        // countdown would run behind a tile `draw_hud` never draws. Whether they may
-        // re-dismiss it is the cancel's business, one line below — a dismissed HUD is focus
-        // off the row.
-        //
-        // …and that cancel is `up_next::countdown_may_run`, the ONE rule, applied here rather
-        // than at each key arm because every way of taking hold of the row (arrows, a click,
-        // walking away to the tabs, opening a panel) ends up as a cursor position and a route
-        // by the time this frame draws. Reading it as a steady state is what makes that true.
-        //
-        // Outside the `Overlay::None` gate above, deliberately: an overlay is the one way of
-        // taking hold of the transport that never moves the ring, and `draw_hud` draws the
-        // control row only for the BARE transport — so gated with the edges above, this block
-        // simply did not run for a tile that was already counting down when the Info card
-        // opened, and it cut to the next episode from behind a panel. The route is the rule's
-        // third input rather than a condition here, so there is still exactly one place that
-        // decides.
-        // `bare` is the rule's third input and is the CONTAINER's answer now: "no panel is
-        // up". It used to be `matches!(route, Route::Player { overlay: Overlay::None })`.
-        let bare = !app.pages.surface_up();
-        if matches!(app.route(), AppArg::Player) {
+        if let Some(request) = focus_request { super::bridge::request_hud_focus(&mut app.pages, request); }
+        let reset_hud = if matches!(app.route(), AppArg::Player) {
             let paused_now = paused();
-            if let Some(player) = super::bridge::player_mut(&mut app.pages) {
-                if player.up_next.armed() {
-                    let focus = player.hud_focus();
-                    if plx_appkit::up_next::countdown_may_run(
-                        bare,
-                        focus.on_secondary(),
-                        focus.secondary_item(),
-                    ) {
-                        player.hud.dismissed = false;
-                        player.hud.extend(fr.now, HUD_LINGER_MS);
-                    } else {
-                        player.up_next.cancel();
-                    }
-                }
-                // when the HUD auto-hides, park focus back on the scrubber so the next reveal
-                // is clean
-                if !player.hud.visible(&mut app.player.session, fr.now, paused_now) {
-                    player.request_hud_focus(plx_screens::player::HudFocusRequest::Home);
-                }
-                player.publish();
-            }
-        }
+            super::bridge::player(&app.pages).is_some_and(|player|
+                !player.hud.visible(&app.player.session, fr.now, paused_now))
+        } else { false };
+        if reset_hud { super::bridge::request_hud_focus(&mut app.pages, plx_screens::player::HudFocusRequest::Home); }
         // hide the idle pointer during playback
         if matches!(app.route(), AppArg::Player)
             && !app.ptr.cur_hidden
@@ -2372,6 +2333,48 @@ fn loop_requests(app: &mut App) {
 /// dev oscillators, the play landing and the remaining pumps — `tick_drain` on the FRAMEDROP
 /// line.
 pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
+        // Observe focus only after this frame's Enter and directional deliveries committed.
+        // While the countdown runs, hold the HUD up — a timer nobody can see is a cut to the
+        // next episode out of nowhere. `hud.dismissed` has to clear with it, not just the
+        // timer: a user who UP-hid the HUD and then touched nothing until the credits still
+        // carries the dismissal, which BEATS `extend_hud` inside `hud_visible`, so the
+        // countdown would run behind a tile `draw_hud` never draws. Whether they may
+        // re-dismiss it is the cancel's business, one line below — a dismissed HUD is focus
+        // off the row.
+        //
+        // …and that cancel is `up_next::countdown_may_run`, the ONE rule, applied here rather
+        // than at each key arm because every way of taking hold of the row (arrows, a click,
+        // walking away to the tabs, opening a panel) ends up as a cursor position and a route
+        // by the time this frame draws. Reading it as a steady state is what makes that true.
+        //
+        // Outside the `Overlay::None` gate above, deliberately: an overlay is the one way of
+        // taking hold of the transport that never moves the ring, and `draw_hud` draws the
+        // control row only for the BARE transport — so gated with the edges above, this block
+        // simply did not run for a tile that was already counting down when the Info card
+        // opened, and it cut to the next episode from behind a panel. The route is the rule's
+        // third input rather than a condition here, so there is still exactly one place that
+        // decides.
+        // `bare` is the rule's third input and is the CONTAINER's answer now: "no panel is
+        // up". It used to be `matches!(route, Route::Player { overlay: Overlay::None })`.
+        let bare = !app.pages.surface_up();
+        if matches!(app.route(), AppArg::Player) {
+            if let Some(player) = super::bridge::player_mut(&mut app.pages) {
+                if player.up_next.armed() {
+                    let focus = player.hud_focus();
+                    if plx_appkit::up_next::countdown_may_run(
+                        bare,
+                        focus.on_secondary(),
+                        focus.secondary_item(),
+                    ) {
+                        player.hud.dismissed = false;
+                        player.hud.extend(fr.now, HUD_LINGER_MS);
+                    } else {
+                        player.up_next.cancel();
+                    }
+                }
+                player.publish();
+            }
+        }
 
 
         // `Route::Login`/`Route::Profiles` no longer have a route-gated `update(dt)` call here
@@ -7949,8 +7952,9 @@ mod lifecycle_regression_tests {
         let mut app = app();
         super::super::bridge::show_page(&mut app.pages, AppArg::Player);
         frame(&mut app, 0);
+        super::super::bridge::request_hud_focus(&mut app.pages, plx_screens::player::HudFocusRequest::TabItem(1));
+        frame(&mut app, 1); // the request is not a second synchronous focus cursor
         let player = super::super::bridge::player_mut(&mut app.pages).unwrap();
-        player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(1));
         player.hud.until = 1;
         player.publish();
         assert!(super::super::bridge::player(&app.pages).unwrap().hud_focus().on_tabs());
@@ -7973,11 +7977,8 @@ mod lifecycle_regression_tests {
         let mut app = app();
         super::super::bridge::show_page(&mut app.pages, AppArg::Player);
         frame(&mut app, 0);
-        {
-            let player = super::super::bridge::player_mut(&mut app.pages).unwrap();
-            player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(1));
-            player.publish();
-        }
+        super::super::bridge::request_hud_focus(&mut app.pages, plx_screens::player::HudFocusRequest::TabItem(1));
+        frame(&mut app, 1);
         super::super::bridge::open_player_overlay(
             &app.player.session,
             app.bridge.metadata_view(),
@@ -8026,8 +8027,8 @@ mod lifecycle_regression_tests {
         );
         step(&mut rig.app, &mut t, vec![down]);
         assert!(super::super::bridge::player(&rig.app.pages).unwrap().hud_focus().on_scrubber());
-        assert!(super::super::bridge::player(&rig.app.pages).unwrap().up_next.armed(),
-            "the request is observed by playback_tick on the next frame");
+        assert!(!super::super::bridge::player(&rig.app.pages).unwrap().up_next.armed(),
+            "the countdown observes the committed engine travel in this frame");
         step(&mut rig.app, &mut t, vec![]);
         assert!(!super::super::bridge::player(&rig.app.pages).unwrap().up_next.armed(),
             "leaving the primary cancels the countdown");

@@ -1016,6 +1016,25 @@ mod tests {
         assert_eq!(split(to.elem), (1, 0), "a selector row re-enters on its remembered selection");
     }
 
+    #[test]
+    fn remembered_seat_reconciles_a_row_that_shrank_while_focus_was_away() {
+        rig!(m, v, cx);
+        let mut tree = Tree::new(E);
+        let row = tree.row(1, 3, 60.0, 20.0, 160.0, 48.0, 180.0);
+        row.spec.seat = Seat::Remembered;
+        row.spec.elem = ElemKind::Control;
+        tree.row(2, 1, 60.0, 200.0, 160.0, 48.0, 180.0);
+        let mut engine = FocusEngine::new();
+        engine.set(OWNER, key(E, 1, 2), Some(GroupId(1)), By::Restore);
+        engine.set(OWNER, key(E, 2, 0), Some(GroupId(2)), By::Restore);
+        tree.groups[0].rects.truncate(1);
+        tree.groups[0].spec.len = 1;
+        tree.groups[0].promote.push((1002, 1000));
+        let Outcome::Moved { to, .. } = engine.move_dir(OWNER, &tree, &[], Dir::Up, &cx) else { panic!("a move") };
+        assert_eq!(to, key(E, 1, 0), "valid immediately, before a queued OK or end-of-frame reconcile");
+        assert!(tree.place(&to.elem, &cx, At::Drawn).is_some());
+    }
+
     /// `Seat::Projected`: the rail→grid door goes through the container's `seat`.
     #[test]
     fn a_seated_door_projects_through_the_container() {
