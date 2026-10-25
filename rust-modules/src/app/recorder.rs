@@ -2497,7 +2497,9 @@ mod tests {
         // **A collection shelf's total moves it to this value.** A Home shelf and a hub row carry
         // the hub's `totalSize` (the linked heading's "· N"), in both the hubs record and the
         // hubs initial state.
-        assert_eq!(plx_ui::rec::state_fp(APP_SHAPES), 0x68eb_d05d_f046_ba72);
+        // Opt-in linked travel is now complete canonical and recorded engine state.
+        // Previous app census: 0x68eb_d05d_f046_ba72. Existing anchors need genuine rerecording.
+        assert_eq!(plx_ui::rec::state_fp(APP_SHAPES), 0x59b5b5c62baa0de1);
     }
 
     /// The gate at the REAL hubs landing site, through the recording the driver loads: a result

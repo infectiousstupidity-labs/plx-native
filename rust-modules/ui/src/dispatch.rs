@@ -989,13 +989,13 @@ where
                 InputKind::Drag { x, y, .. } => Some((PointerKind::Drag, x, y)),
                 _ => None,
             };
+            if pointer.is_some() { self.input.engine.cancel_link_wait(); }
             // a screen that holds the pointer (its content is in motion) takes none of it: the
             // event is recorded, never resolved and never delivered, so it cannot be a miss
             if pointer.is_some() && self.pointer_held() {
                 tap.input(f, &ev);
                 continue;
             }
-            if pointer.is_some() { self.input.engine.cancel_link_wait(); }
             if let Some((kind, x, y)) = pointer {
                 {
                     if self.hit_page() {
@@ -3774,6 +3774,82 @@ mod linked_wait_tests {
                 assert_eq!(counts.commits.get(),0,"no delayed press");
                 assert_eq!(counts.landings.get(),0,"no delayed travel");
                 assert_eq!(d.focus().unwrap().elem,1000);
+            }
+        }
+    }
+
+    #[test]
+    fn linked_wait_rejects_queued_source_press_and_revokes_on_keyboard_route_or_suspend() {
+        let _serial=plx_base::testlock::serial();
+        for case in 0..4 {
+            let (mut d,mut r,counts)=rig();
+            let source=d.focus().unwrap(); let instance=d.top_page().unwrap();
+            d.input.arm(PressArm{key:source,from:PressFrom::Key,holdable:false},MachineId::Instance(instance),0);
+            let id=d.input.arm.unwrap().id;
+            frame(&mut d,&mut r,16,vec![key(Key::Down,Edge::Down,16)],&mut NoTap);
+            assert!(d.input.engine.pending_link().is_some());
+            assert!(d.input.arm.is_none(),"travel revokes the source press even though focus has not moved");
+            d.emit(MachineId::Input,Fx::Deliver(MachineId::Instance(instance),Delivery::Press{id,key:source,held:false}));
+            frame(&mut d,&mut r,32,vec![],&mut NoTap);
+            assert_eq!(counts.commits.get(),0,"a queued source commit cannot pass through a wait");
+            match case {
+                0=>frame(&mut d,&mut r,48,vec![InputEvent {at:tick(48),source:plx_machine::machine::Source::Script,
+                    kind:InputKind::SystemKeyboard(true)}],&mut NoTap),
+                1=>d.request(MachineId::Nav,NavOp::Push(FixtureArg::Page(71))),
+                2=>d.suspend(),
+                _=>frame(&mut d,&mut r,48,vec![key(Key::Right,Edge::Down,48)],&mut NoTap),
+            }
+            assert!(d.input.engine.pending_link().is_none(),"case {case}");
+            for ms in [100,200] {frame(&mut d,&mut r,ms,vec![],&mut NoTap);}
+            assert_eq!(counts.landings.get(),0,"revoked owner/intent never lands later, case {case}");
+        }
+    }
+
+    #[test]
+    fn linked_wait_replay_rejects_invalid_owner_source_declaration_or_direction() {
+        let _serial=plx_base::testlock::serial();
+        let (mut d,mut r,_)=rig(); let mut tape=Tape::default();
+        frame(&mut d,&mut r,16,vec![key(Key::Down,Edge::Down,16)],&mut tape);
+        for case in 0..6 {
+            let (mut d,mut r,_)=rig();
+            let mut rows=tape.rows.clone(); let pending=rows[0].1.pending.as_mut().unwrap();
+            match case {
+                0=>pending.owner=InputOwner::Entry(EntryId(99)),
+                1=>pending.source.entry=EntryId(99),
+                2=>pending.source.elem=1001,
+                3=>pending.link.to=GroupId(3),
+                4=>pending.link.from=GroupId(2),
+                _=>pending.link.dir=Dir::Up,
+            }
+            let mut replay=Tape{rows,mode:Some(false),..Default::default()};
+            frame(&mut d,&mut r,16,vec![key(Key::Down,Edge::Down,16)],&mut replay);
+            assert!(!replay.errors.is_empty(),"case {case}");
+            assert!(d.input.engine.pending_link().is_none(),"invalid continuation must not be installed");
+            assert_eq!(d.focus().unwrap().elem,1000);
+        }
+    }
+
+    #[test]
+    fn linked_wait_pointer_group_none_roundtrips_without_inventing_memory() {
+        let _serial=plx_base::testlock::serial();
+        for mode in [None,Some(false),Some(true)] {
+            let (mut d,mut r,_)=rig(); let source=d.focus().unwrap();
+            d.input.engine.clear(InputOwner::Entry(source.entry));
+            d.set_focus(Some(source)); // pointer-style focus with no known group
+            let mut record=Tape::default();
+            frame(&mut d,&mut r,16,vec![key(Key::Down,Edge::Down,16)],&mut record);
+            assert!(record.errors.is_empty(),"{:?}",record.errors);
+            assert!(record.rows.iter().all(|(_,a)|a.pending.is_some() && a.group.is_none()));
+            if let Some(resolve)=mode {
+                let (mut d,mut r,counts)=rig();
+                d.input.engine.clear(InputOwner::Entry(source.entry)); d.set_focus(Some(source));
+                let mut replay=Tape{rows:record.rows,mode:Some(resolve),..Default::default()};
+                frame(&mut d,&mut r,16,vec![key(Key::Down,Edge::Down,16)],&mut replay);
+                assert!(replay.errors.is_empty(),"{:?}",replay.errors);
+                assert!(d.input.engine.pending_link().is_some());
+                assert_eq!(d.focus_record().unwrap().2,None);
+                frame(&mut d,&mut r,100,vec![],&mut NoTap);
+                assert_eq!(counts.landings.get(),1);
             }
         }
     }

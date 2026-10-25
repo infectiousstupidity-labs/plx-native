@@ -1014,6 +1014,13 @@ mod tests {
         let hash = |e: &FocusEngine<u32>| { let mut c=Canon::new(); e.write_with(&mut c,&|k,c|{c.u32(*k);}); c.finish() };
         let before = hash(&engine);
         engine.move_dir(OWNER,&page,&[CHROME_LINK],Dir::Down,&cx);
+        // Pin the encoding itself, not merely that some field happens to perturb a hash.
+        let mut c=Canon::new();
+        c.seq(1).discriminant(0).u32(E.0).u32(E.0).u32(1000);
+        c.option(Some(GroupId(1)),|c,g|{c.u32(g.0);});
+        c.seq(1).u32(E.0).u32(1).u32(1000);
+        c.option(Some(()),|c,_|{c.discriminant(0).u32(E.0).u32(E.0).u32(1000).u32(1).u32(1).u32(2);});
+        assert_eq!(hash(&engine),c.finish(),"complete owner/source/link canon order");
         assert_ne!(hash(&engine),before,"same focus/memory but a pending link must change canon");
         engine.cancel_link_wait();
         assert_eq!(hash(&engine),before);
