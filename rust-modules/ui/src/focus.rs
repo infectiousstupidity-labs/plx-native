@@ -277,10 +277,15 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
             }
             Seat::First => f.seat(spec.id, head_of(spec.extent), cx),
             Seat::Remembered => match self.remembered_in(entry_of(projected), spec.id) {
-                Some(k) => FocusKey {
-                    entry: entry_of(projected),
-                    elem: k,
-                },
+                Some(k) => {
+                    // A row may shrink while focus is elsewhere. Resolve its memory before
+                    // queued input can act, not only at the end-of-frame reconciliation.
+                    let key = f.reconcile(FocusKey { entry: entry_of(projected), elem: k }, cx);
+                    if key.entry == projected.entry && f.group_of(&key.elem, cx) == Some(spec.id)
+                        && f.place(&key.elem, cx, At::SpringTarget).is_some() {
+                        key
+                    } else { projected }
+                }
                 None => projected,
             },
             Seat::RememberedFirst => {
@@ -1033,6 +1038,24 @@ mod tests {
         let Outcome::Moved { to, .. } = engine.move_dir(OWNER, &tree, &[], Dir::Up, &cx) else { panic!("a move") };
         assert_eq!(to, key(E, 1, 0), "valid immediately, before a queued OK or end-of-frame reconcile");
         assert!(tree.place(&to.elem, &cx, At::Drawn).is_some());
+    }
+
+    #[test]
+    fn remembered_seat_rejects_a_reconciliation_outside_the_requested_group_or_without_a_place() {
+        rig!(m, v, cx);
+        for answer in [2000, 1009] {
+            let mut tree = Tree::new(E);
+            let row = tree.row(1, 1, 60.0, 20.0, 160.0, 48.0, 180.0);
+            row.spec.seat = Seat::Remembered;
+            row.spec.elem = ElemKind::Control;
+            row.promote.push((1002, answer));
+            tree.row(2, 1, 60.0, 200.0, 160.0, 48.0, 180.0);
+            let mut engine = FocusEngine::new();
+            engine.set(OWNER, key(E, 1, 2), Some(GroupId(1)), By::Restore);
+            engine.set(OWNER, key(E, 2, 0), Some(GroupId(2)), By::Restore);
+            let Outcome::Moved { to, .. } = engine.move_dir(OWNER, &tree, &[], Dir::Up, &cx) else { panic!("a move") };
+            assert_eq!(to, key(E, 1, 0), "fall back to the ordinary seat for {answer}");
+        }
     }
 
     /// `Seat::Projected`: the rail→grid door goes through the container's `seat`.

@@ -407,10 +407,9 @@ impl HudState {
     /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a Skip pill, the
     /// RIGHT-hand one for Up Next, where parking on item 0 would disarm the timer on the frame
     /// after it armed.
-    pub fn raise_for_offer(&mut self, now: u32, primary: c_int) {
+    pub fn raise_for_offer(&mut self, now: u32, _primary: c_int) {
         self.extend(now, HUD_LINGER_MS);
         self.dismissed = false;
-        let _ = primary; // seating is an engine request from PlayerScreen::raise_for_offer
     }
 }
 // scrub tuning: a press jumps scrub_step_ns() (the Skip interval); holding engages a continuous scrub stepping
@@ -686,7 +685,7 @@ mod hud_visibility_tests {
     /// A fresh offer takes the control row FROM REST — and clearing the dismissal is half of "on
     /// screen", which is the half that was missing.
     #[test]
-    fn a_fresh_offer_puts_the_transport_up_and_parks_the_ring_on_the_primary() {
+    fn a_fresh_offer_puts_the_transport_up_without_writing_focus() {
         let ps = plx_media::route::PlaybackSession::IDLE;
         with_state(PlaybackState::Playing, || {
             let now = 10_000u32;
@@ -694,14 +693,7 @@ mod hud_visibility_tests {
             hud.dismissed = true; // UP-hidden mid-episode, exactly as reported
             hud.raise_for_offer(now, plx_appkit::up_next::PRIMARY_BTN);
             assert!(hud.visible(&ps, now, false), "an offer clears a hand dismissal");
-            assert_eq!(
-                hud.nav.focus, 1,
-                "on the control row, so the auto-hide re-park leaves it"
-            );
-            assert!(
-                plx_appkit::up_next::countdown_may_run(true, hud.nav.focus == 1, hud.nav.btn),
-                "…and RESTING on the primary, which is what the next frame's cancel rule asks"
-            );
+            assert_eq!(hud.nav.focus, 0, "visibility cannot write the engine's focus projection");
         });
     }
 

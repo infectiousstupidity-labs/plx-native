@@ -1585,8 +1585,9 @@ impl Drop for SkipIntervalGuard {
     }
 }
 
-/// Where a scrub target may legally land: never before zero, and never inside the last three
-/// seconds, which is a seek past the point the pipeline can prime from.
+/// Where a scrub target may legally land: never before zero. Clips longer than three seconds
+/// reserve the final three seconds for priming; shorter positive clips cap at their duration.
+/// Invalid/non-positive duration admits only zero.
 pub fn scrub_clamp_target(ns: i64, duration_ns: i64) -> i64 {
     if duration_ns <= 0 {
         return 0;
