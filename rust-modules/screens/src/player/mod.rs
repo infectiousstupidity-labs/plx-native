@@ -544,11 +544,9 @@ impl PlayerScreen {
     }
 }
 
-/// The four focus groups [`PlayerScreen`] registers (restructure phase 12, D2): the scrubber, the
-/// control row (discs, or the one region a Skip/Up Next stand-in occupies), the bottom tabs, and —
-/// only while a failure owns the frame — the read-out's row of actions. Element addresses
-/// within each are [`player_hud::ELEM_SCRUB`]/[`player_hud::ELEM_ROW_BASE`]/
-/// [`player_hud::ELEM_TAB_BASE`]/[`player_hud::ELEM_FAILURE_BASE`].
+/// Stable namespaces for the scrubber, right secondary row, bottom tabs, failure/repair actions
+/// and centered Play/Pause. Only operable center controls are declared; transient restoration
+/// travel belongs to the shared engine's declared-Link continuation, never another screen cursor.
 const GROUP_SCRUB: GroupId = GroupId(0);
 const GROUP_ROW: GroupId = GroupId(1);
 const GROUP_TABS: GroupId = GroupId(2);
@@ -1425,6 +1423,20 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             });
         }
     }
+    fn link_wait(&self, link: Link, cx: &Cx<'_, H>) -> bool {
+        if link != (Link { from: GROUP_SCRUB, dir: Dir::Down, to: GROUP_CENTER }) {
+            return false;
+        }
+        // This is logical eligibility for the engine's existing restoration wait, NOT operability:
+        // center_available still withholds the group, paint, stops and activation until chrome returns.
+        self.hud_policy == HudPolicy::Normal && !self.scrub.is_live() && !self.scrub.drag
+            && !self.row.chrome_interactive() && self.row.scrub_motion_animating(cx.tick.ms)
+            && player_hud::center_transport_available(
+                plx_media::player::state(H::session(cx)), plx_media::player::seen_frame(),
+                self.hud_drawn(H::session(cx), cx.tick.ms), self.transport,
+                self.repair_alert.visible() || player_hud::readout_owns_frame(self.busy), true,
+            )
+    }
     fn group_of(&self, key: &u32, cx: &Cx<'_, H>) -> Option<GroupId> {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_ROW_BASE, ELEM_SCRUB, ELEM_TAB_BASE};
         if self.repair_alert.visible() {
@@ -1600,11 +1612,11 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         self.draw_subtitle_bitmap(subs_lift); // PGS/VobSub image subs
         // What a pointer can hit is registered AFTER the paint, by `record_stops`, from this
         // screen's own `Focusable` — the rects D-pad focus uses, in the z-order `groups` states.
-        // `Hover::Ignore` on the transport's stops: the old pointer path never followed the mouse
-        // into a HOVER-driven focus change on this route, and a DRAG is `§7.5`'s own case (no
-        // hover, no click) which the hit map answers whatever this says.
+        // Center Play/Pause uses Hover::Focus/Activate::Press, sharing the dispatcher's OK and
+        // pointer commit. The older scrubber/secondary/tab stops keep Hover::Ignore and
+        // Activate::Direct; a DRAG remains `§7.5`'s own case (no hover, no click).
         //
-        // `Activate::Direct` on them, and it is not the same statement `ElemKind` makes
+        // Direct delivery is not the same statement `ElemKind` makes
         // elsewhere: the transport's control row DOES dip, but its press is the LOOP's
         // (`PlayerReq::ArmControlRow` → `press.begin_ctl` → `activate_player_row` on the
         // spring-back), so letting the dispatcher's own press machine arm it instead would leave
@@ -1723,6 +1735,29 @@ mod clock_animator_tests {
     /// The other half, asserted once per test: a report really does open the gate.
     fn presents(now: u32) -> bool {
         plx_machine::idle::should_present(now)
+    }
+
+    #[test]
+    fn center_pause_and_eligibility_changes_invalidate_once_then_rest() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Paused);
+        let paused = plx_media::player::TX.paused.swap(true, Relaxed);
+        let ps = PlaybackSession::IDLE;
+        let mut pl = Player::new();
+        let mut screen = PlayerScreen::new(EntryId(1)); screen.hud.extend(1_000, 60_000);
+        settled(&mut pl, &screen, &ps, 1_000);
+        plx_media::player::TX.paused.store(false, Relaxed);
+        assert!(reported(&mut pl, &screen, &ps, 1_016), "the action changes from Play to Pause");
+        assert!(!reported(&mut pl, &screen, &ps, 1_032), "unchanged action rests");
+        plx_media::player::TX.paused.store(true, Relaxed);
+        assert!(reported(&mut pl, &screen, &ps, 1_048));
+        assert!(!reported(&mut pl, &screen, &ps, 1_064));
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Idle as u8);
+        assert!(reported(&mut pl, &screen, &ps, 1_080), "center disappearance repaints even at a stationary paused clock");
+        assert!(!reported(&mut pl, &screen, &ps, 1_096));
+        plx_media::player::TX.paused.store(paused, Relaxed);
+        plx_media::player::restore_state_for_test(previous);
     }
 
     /// **The MEDIA CLOCK class** — the scrub bar, the playhead, both clocks, the hold-to-scrub
@@ -2656,17 +2691,127 @@ mod step_ladder_tests {
         let mut links = Vec::new(); Screen::<TestHost>::links(&page, &mut links);
         engine.move_dir(owner, &page, &links, Dir::Down, &context);
         assert_eq!(engine.current(owner).unwrap().elem, player_hud::ELEM_SCRUB);
+        assert!(engine.pending_link().is_some(), "only the engine retains the declared Down");
         assert!(page.hud_stops_for_test(&context).iter().all(|s| s.key.elem != player_hud::ELEM_CENTER_PLAY_PAUSE));
+        let mut landings = 0;
         for now in (1_352..=2_200).step_by(16) {
             context.tick.ms = now; context.focus = engine.read(owner);
             let mut effects = Vec::new(); let mut present = plx_machine::present::Present::new();
             page.step(&ScreenEvent::Tick(context.tick), &context, &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present));
-            engine.reconcile(owner, &page, &context);
+            links.clear(); Screen::<TestHost>::links(&page, &mut links);
+            if let plx_ui::focus::Outcome::Moved { from, to, by } = engine.reconcile_linked(owner, &page, &links, &context) {
+                assert!(page.row.chrome_interactive(), "never land on masked chrome");
+                context.focus = engine.read(owner);
+                page.step(&ScreenEvent::FocusMoved { from, to, by }, &context,
+                    &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present));
+                landings += 1;
+            }
+            assert!(!effects.iter().any(|e| matches!(e.fx, Fx::App(AppFx::Player(_)))), "restoration emits no playback action");
         }
+        assert_eq!(landings, 1, "a single accepted Down completes exactly once");
+        assert!(engine.pending_link().is_none());
         let landed = engine.current(owner).unwrap().elem;
         plx_media::player::SHARED.duration_ns.store(duration, std::sync::atomic::Ordering::Relaxed);
         plx_media::player::restore_state_for_test(previous);
         assert_eq!(landed, player_hud::ELEM_CENTER_PLAY_PAUSE, "the original Down must finish only after chrome becomes interactive");
+    }
+
+    /// Actual restoration fixtures use the production input path; only the shared engine retains
+    /// the delayed destination. Callers own the serial media guard and playback state.
+    fn center_wait_fixture() -> (PlayerScreen, plx_ui::focus::FocusEngine<u32>, Cx<'static, TestHost>) {
+        let mut page = PlayerScreen::new(ENTRY); fresh(&mut page);
+        press(&mut page, plx_ui::consts::SDLK_RIGHT, 0, Edge::Down);
+        for now in (1_000..=1_320).step_by(16) { tick(&mut page, now); }
+        let mut engine = engine_for(&page);
+        let owner = InputOwner::Entry(ENTRY);
+        let mut context = cx(); context.tick.ms = 1_336; context.focus = engine.read(owner);
+        let input = ScreenEvent::Input(InputEvent { at: context.tick, source: Source::Sdl,
+            kind: InputKind::Key { key: plx_machine::machine::Key::Down, sym: SDLK_DOWN, wcode: 0, edge: Edge::Down, at_edge: false } });
+        let mut effects = Vec::new(); let mut present = plx_machine::present::Present::new();
+        assert_eq!(page.step(&input, &context, &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present)), Handled::No);
+        assert!(!page.scrub.is_live());
+        let mut links = Vec::new(); Screen::<TestHost>::links(&page, &mut links);
+        engine.move_dir(owner, &page, &links, Dir::Down, &context);
+        (page, engine, context)
+    }
+
+    #[test]
+    fn center_link_wait_requires_exact_link_and_cancels_on_lost_eligibility() {
+        use plx_media::player::{PlaybackState as S, SHARED};
+        use std::sync::atomic::Ordering::Relaxed;
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(S::Playing);
+        let duration = SHARED.duration_ns.swap(100_000_000_000, Relaxed);
+        let seen = SHARED.seen_frame.swap(false, Relaxed);
+        let owner = InputOwner::Entry(ENTRY);
+        let link = Link { from: GROUP_SCRUB, dir: Dir::Down, to: GROUP_CENTER };
+        for case in ["idle", "error", "resolving", "connecting", "cold-buffering", "hidden", "lifted", "dismissed", "middle", "failure", "repair", "live-scrub", "drag"] {
+            plx_media::player::restore_state_for_test(S::Playing as u8);
+            let (mut page, mut engine, mut context) = center_wait_fixture();
+            assert!(engine.pending_link().is_some(), "{case}: fixture retains Down");
+            assert!(Focusable::<TestHost>::link_wait(&page, link, &context));
+            for wrong in [Link { dir: Dir::Up, ..link }, Link { from: GROUP_TABS, ..link }, Link { to: GROUP_ROW, ..link }] {
+                assert!(!Focusable::<TestHost>::link_wait(&page, wrong, &context));
+            }
+            match case {
+                "idle" => plx_media::player::restore_state_for_test(S::Idle as u8),
+                "error" => plx_media::player::restore_state_for_test(S::Error as u8),
+                "resolving" => plx_media::player::restore_state_for_test(S::Resolving as u8),
+                "connecting" => plx_media::player::restore_state_for_test(S::Connecting as u8),
+                "cold-buffering" => plx_media::player::restore_state_for_test(S::Buffering as u8),
+                "hidden" => page.set_hud_policy(HudPolicy::Hidden),
+                "lifted" => page.set_hud_policy(HudPolicy::Lifted),
+                "dismissed" => page.hud.dismissed = true,
+                "middle" => page.transport = false,
+                "failure" => page.busy = player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"failed"),
+                "repair" => page.repair_alert.open(c"repair"),
+                "live-scrub" => { page.scrub.ns = 5_000_000_000; page.publish(); }
+                "drag" => page.scrub.drag = true,
+                _ => unreachable!(),
+            }
+            assert!(!Focusable::<TestHost>::link_wait(&page, link, &context), "{case}: revoke logical wait");
+            let mut links = Vec::new(); Screen::<TestHost>::links(&page, &mut links);
+            engine.reconcile_linked(owner, &page, &links, &context);
+            assert!(engine.pending_link().is_none(), "{case}: no latent destination");
+            // Even recovery cannot resurrect the abandoned press into a later eligible frame.
+            plx_media::player::restore_state_for_test(S::Playing as u8);
+            page.busy = player_hud::Busy::None; page.repair_alert.close();
+            page.set_hud_policy(HudPolicy::Normal); page.transport = true; fresh(&mut page);
+            page.scrub.cancel(); page.publish();
+            for now in (1_352..=2_200).step_by(16) {
+                context.tick.ms = now; context.focus = engine.read(owner);
+                let mut effects = Vec::new(); let mut present = plx_machine::present::Present::new();
+                page.step(&ScreenEvent::Tick(context.tick), &context, &mut Effects::new(&mut effects, MachineId::Instance(INST), &mut present));
+                links.clear(); Screen::<TestHost>::links(&page, &mut links);
+                engine.reconcile_linked(owner, &page, &links, &context);
+                assert!(engine.pending_link().is_none());
+                assert_ne!(engine.current(owner).unwrap().elem, player_hud::ELEM_CENTER_PLAY_PAUSE, "{case}: no late jump");
+            }
+        }
+        SHARED.seen_frame.store(seen, Relaxed); SHARED.duration_ns.store(duration, Relaxed);
+        plx_media::player::restore_state_for_test(previous);
+    }
+
+    #[test]
+    fn center_pop_steps_only_on_tick_and_rests() {
+        let _g = plx_base::testlock::serial();
+        let previous = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Paused);
+        let mut page = PlayerScreen::new(ENTRY); fresh(&mut page);
+        page.hud.nav.focus = 3; // projection consumed by this direct fixture's retained engine
+        let before = page.row.center_scale(0.0);
+        let (_, moving) = plx_machine::idle::scoped_motion(|| tick(&mut page, 1_000));
+        let popped = page.row.center_scale(0.0);
+        assert!(moving && popped > before, "Tick steps and reports the shared center spring");
+        let mut context = cx(); context.tick.ms = 1_000;
+        for _ in 0..10 {
+            let placed = Focusable::<TestHost>::place(&page, &player_hud::ELEM_CENTER_PLAY_PAUSE, &context, At::Drawn).unwrap();
+            assert_eq!(placed.rect, player_hud::center_play_pause_rect(popped));
+        }
+        assert_eq!(page.row.center_scale(0.0), popped, "placement is read-only");
+        for now in (1_016..=3_000).step_by(16) { tick(&mut page, now); }
+        let (_, moving) = plx_machine::idle::scoped_motion(|| tick(&mut page, 3_016));
+        assert!(!moving, "a settled paused control owes no perpetual frames");
+        plx_media::player::restore_state_for_test(previous);
     }
 
     #[test]
