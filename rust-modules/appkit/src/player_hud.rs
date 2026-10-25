@@ -996,12 +996,21 @@ pub fn busy(ps: &plx_media::route::PlaybackSession) -> Busy {
 
 // ---- the transport STATE READ-OUT (the glyph slot just past the elapsed clock) ---------------
 //
-// One slot, one glyph, four states. It is a READ-OUT and not an action toggle — there is no
-// transport button row in this app and a standing owner decision forbids adding one, so nothing
-// here is focusable, hit-tested or in `BTN_N`. The glyphs are the design system's transport
-// family (`Icon::Rewind` / `Icon::Pause` / `Icon::FastForward`, all in one 14-unit band, with
-// `Icon::Play` swapping in for `Pause`), which is what keeps the slot from shifting optical
-// weight as the state flips under a running clock.
+// One slot, one glyph, four states. This remains a READ-OUT, not the centered action toggle: the
+// clock and its mark describe playback progress while the separate center button shows the next
+// action. The glyphs are the design system's transport family (`Icon::Rewind` / `Icon::Pause` /
+// `Icon::FastForward`, all in one 14-unit band, with `Icon::Play` swapping in for `Pause`), which
+// keeps the slot from shifting optical weight as the state flips under a running clock.
+
+/// The centered action's glyph is derived from the transport state the viewer sees, not a pause
+/// temporarily imposed by an in-flight claim.
+fn center_action_icon(viewer_paused: bool) -> plx_ui::icons::Icon {
+    if viewer_paused {
+        plx_ui::icons::Icon::Play
+    } else {
+        plx_ui::icons::Icon::Pause
+    }
+}
 
 /// How long [`TransportMark::Play`] stands after a resume — "a couple of seconds", per the owner:
 /// the mark answers *did that press land*, and a play glyph held for the whole film would be
@@ -2141,11 +2150,7 @@ pub fn draw_hud(
         }
 
         if center_available && chrome {
-            let icon = if plx_media::player::TX.paused.load(Relaxed) {
-                plx_ui::icons::Icon::Play
-            } else {
-                plx_ui::icons::Icon::Pause
-            };
+            let icon = center_action_icon(plx_media::player::transport::viewer_paused());
             CircleButton::new(c"".as_ptr())
                 .icon(icon)
                 .frame(center_play_pause_rect(1.0))
@@ -2277,6 +2282,31 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn center_action_shows_pause_during_claim_hold_and_play_for_viewer_pause() {
+        let _lock = plx_base::testlock::serial();
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let was_paused = plx_media::player::TX.paused.swap(true, Relaxed);
+        plx_media::player::claim_hold::clear();
+        plx_media::route::reset_player_control_for_test(&ps);
+        plx_media::player::claim_hold::hold_for_test(7, true);
+        plx_media::route::force_applying_for_test(7);
+
+        assert!(plx_media::player::TX.paused.load(Relaxed), "claim hold pauses the engine");
+        assert!(!plx_media::player::transport::viewer_paused(), "the hold is not the viewer's pause");
+        assert_eq!(super::center_action_icon(plx_media::player::transport::viewer_paused()), plx_ui::icons::Icon::Pause);
+
+        plx_media::player::claim_hold::clear();
+        assert!(plx_media::player::transport::viewer_paused(), "without the hold, this is a viewer pause");
+        assert_eq!(super::center_action_icon(plx_media::player::transport::viewer_paused()), plx_ui::icons::Icon::Play);
+
+        plx_media::player::TX.paused.store(was_paused, Relaxed);
+        plx_media::player::claim_hold::clear();
+        plx_media::route::reset_player_control_for_test(&ps);
+    }
+
     #[test]
     fn center_play_pause_geometry() {
         use super::*;
