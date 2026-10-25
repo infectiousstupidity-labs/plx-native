@@ -1562,7 +1562,10 @@ pub(crate) unsafe fn key_ok(
         // transport visible and this arm would open a panel from behind it
         // (`HudState::visible_at_press`).
         let Some((vis, focus, tab)) = super::bridge::player(pages)
-            .map(|player| (player.hud.visible_at_press, player.hud.nav.focus, player.hud.nav.tab))
+            .map(|player| {
+                let selection = player.hud_focus();
+                (player.hud.visible_at_press, selection.focus_index(), selection.tab_item())
+            })
         else {
             return;
         };

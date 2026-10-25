@@ -25,9 +25,7 @@ use plx_media::player::report::AttemptOrigin;
 // gesture's constants and its two pure policies (`scrub_press`, `failed_key_action`) are read by
 // `screens::player` alone now, so re-exporting them here would be this module claiming a
 // vocabulary it no longer uses.
-pub(crate) use plx_screens::player::input::{
-    HudNav, HudState, Scrub, HUD_HEADLESS_MS, HUD_LINGER_MS,
-};
+pub(crate) use plx_screens::player::input::{HudState, Scrub, HUD_HEADLESS_MS, HUD_LINGER_MS};
 // The modal repeat cadence is `screens::registry`'s (phase 10 merge): the item context menu is a
 // surface of its own family and needs the same gate, so it is shared vocabulary rather than the
 // player's. `App::modal_repeat` still reaches it through this re-export.
@@ -411,9 +409,9 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     // `set_paused`/`set_hud` below it: the HUD that is about to be drawn belongs to THIS
     // attempt either way.
     // A NEW session starts on the scrubber with its transport pinned for `hud_ms`, and both
-    // halves of that are now the INSTANCE's: a fresh mount is built at `HudState::IDLE` (which is
-    // `HudNav::HOME`, an empty countdown and no dismissal), so the per-session reset that used to
-    // be four hand-written assignments here is what mounting one costs.
+    // halves of that are now the INSTANCE's: a fresh mount is built at `HudState::IDLE` (the
+    // scrubber-home selection, an empty countdown and no dismissal), so the per-session reset that
+    // used to be four hand-written assignments here is what mounting one costs.
     //
     // **Both paths, because there are two.** An ordinary start flips the route and the page mounts
     // next frame, so the pin is SEEDED for that mount; an auto-advance chain (episode → episode →
@@ -603,7 +601,8 @@ pub(crate) fn player_requests(
             }
             PlayerReq::FocusTabs => {
                 if let Some(player) = super::bridge::player_mut(pages) {
-                    player.hud.nav.focus = 2;
+                    let tab = player.hud_focus().tab_item();
+                    player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(tab));
                 }
             }
             // The fall-through a surface cannot perform (`screens::player::overlay`'s module doc):
@@ -1184,7 +1183,8 @@ pub(crate) unsafe fn activate_player_row(
 ) {
     // The cursor is the instance's; read the one field this dispatch turns on, so the container
     // is borrowed once and the arms below are free to present a panel on it.
-    let btn = super::bridge::player(pages).map_or(0, |player| player.hud.nav.btn);
+    let btn = super::bridge::player(pages)
+        .map_or(0, |player| player.hud_focus().secondary_item());
     if !ctrl.is_discs() {
         // A stand-in owns row 1 — activate it. Same value the draw used. (Its `true` answer used
         // to clear the loop's client-side hold-repeat sym as well, so an async route flip could

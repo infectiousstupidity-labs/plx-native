@@ -45,6 +45,7 @@ use plx_ui::screen::{
 use plx_appkit::up_next::Countdown;
 use plx_ui::Rect;
 
+pub use input::{HudFocusRequest, HudFocusSelection};
 use input::{HudState, Scrub};
 
 /// The player's heartbeat word — byte-identical to `app::words::route_word(&AppArg::Player)`, and
@@ -180,6 +181,19 @@ impl PlayerScreen {
             failure_up: false,
             clock_warm: Default::default(),
         }
+    }
+
+    /// Request an external HUD focus destination through the player-owned compatibility seam.
+    ///
+    /// The current implementation still updates [`HudNav`] directly; task HUD-01.03 can switch
+    /// this method to engine delivery without changing any application caller.
+    pub fn request_hud_focus(&mut self, request: HudFocusRequest) {
+        self.hud.nav.apply_focus_request(request);
+    }
+
+    /// Return the read-only selection projection used by app orchestration and diagnostics.
+    pub fn hud_focus(&self) -> HudFocusSelection {
+        self.hud.nav.selection()
     }
 
     /// **Mirror the two published fields into `player::TX`** (§2.3).
@@ -1850,6 +1864,52 @@ mod step_ladder_tests {
     fn fresh(page: &mut PlayerScreen) {
         page.hud.dismissed = false;
         page.hud.extend(1_000, input::HUD_LINGER_MS);
+    }
+
+    /// The external HUD seam keeps the old three-region behavior while hiding the cursor storage:
+    /// item requests select a region, a scrubber request preserves remembered row items, and a
+    /// home request is the explicit reset used by stand-in disappearance and auto-hide.
+    #[test]
+    fn external_hud_focus_requests_preserve_and_reset_the_legacy_selection() {
+        let mut page = PlayerScreen::new(ENTRY);
+        page.request_hud_focus(HudFocusRequest::SecondaryItem(2));
+        let secondary = page.hud_focus();
+        assert!(secondary.on_secondary());
+        assert_eq!(secondary.secondary_item(), 2);
+
+        // The Up Next primary keeps its countdown only while the selection remains on that item.
+        page.request_hud_focus(HudFocusRequest::SecondaryItem(plx_appkit::up_next::PRIMARY_BTN));
+        let primary = page.hud_focus();
+        assert!(plx_appkit::up_next::countdown_may_run(
+            true,
+            primary.on_secondary(),
+            primary.secondary_item(),
+        ));
+
+        // Returning from an overlay names the selected tab without disturbing the secondary row.
+        page.request_hud_focus(HudFocusRequest::TabItem(1));
+        let tabs = page.hud_focus();
+        assert!(tabs.on_tabs());
+        assert!(!plx_appkit::up_next::countdown_may_run(
+            true,
+            tabs.on_secondary(),
+            tabs.secondary_item(),
+        ));
+        assert_eq!(tabs.tab_item(), 1);
+        assert_eq!(tabs.secondary_item(), plx_appkit::up_next::PRIMARY_BTN);
+
+        // A scrubber request is distinct from the old HOME reset and preserves both remembered items.
+        page.request_hud_focus(HudFocusRequest::Scrubber);
+        let scrubber = page.hud_focus();
+        assert!(scrubber.on_scrubber());
+        assert_eq!(
+            (scrubber.secondary_item(), scrubber.tab_item()),
+            (plx_appkit::up_next::PRIMARY_BTN, 1),
+        );
+
+        // Both auto-hide and a disappearing stand-in use the explicit reset, not Scrubber.
+        page.request_hud_focus(HudFocusRequest::Home);
+        assert_eq!(page.hud_focus(), HudFocusSelection::HOME);
     }
 
     /// One BOUND key press as the app delivers it: `note_global_press` samples the fresh-press

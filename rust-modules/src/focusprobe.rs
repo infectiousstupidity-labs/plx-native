@@ -162,11 +162,11 @@ pub(crate) enum Screen {
 
 /// The player HUD's focus cursor, plus whether the transport is on screen at all.
 ///
-/// A copy of the `HudNav` cursor `plex_run` holds as a local. The type is a non-`pub` item of
-/// `app`, which `lib.rs` declares as a private `mod`, so it cannot be named from here — the same
-/// boundary `Route` sits behind. `visible` is `app.rs`'s `hud_visible(…)` — the same
-/// value its own OK and LEFT/RIGHT arms branch on — because the HUD's visibility decides whether a
-/// press moves the cursor or merely reveals the bar.
+/// A copy of the player's read-only HUD selection projection, plus visibility. The cursor storage
+/// remains private to the owning player screen; the application samples this projection for the
+/// diagnostic line without creating a second cursor. `visible` is `app.rs`'s `hud_visible(…)` —
+/// the same value its own OK and LEFT/RIGHT arms branch on — because the HUD's visibility decides
+/// whether a press moves the cursor or merely reveals the bar.
 #[derive(Clone, Copy)]
 pub(crate) struct Hud {
     pub(crate) focus: c_int,

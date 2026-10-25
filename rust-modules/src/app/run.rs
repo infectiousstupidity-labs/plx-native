@@ -732,8 +732,7 @@ pub(crate) fn pin_headless_hud(app: &mut App, now: u32, tab: Option<i32>) {
     if let Some(player) = super::bridge::player_mut(&mut app.pages) {
         player.hud.extend(now, HUD_HEADLESS_MS);
         if let Some(tab) = tab {
-            player.hud.nav.focus = 2;
-            player.hud.nav.tab = tab;
+            player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(tab));
         }
         player.publish();
     }
@@ -1968,15 +1967,15 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             } else if plx_appkit::player_hud::standin_left_the_ring(
                 player.hud.was_standin,
                 fr.ctrl,
-                player.hud.nav.focus == 1,
+                player.hud_focus().on_secondary(),
             ) {
                 // The stand-in went away under the focus ring. Without this the row swaps back
                 // to the discs with focus still on it and `btn` still 0, so the next OK opened
                 // the SUBTITLES menu instead of toggling pause — exactly the bug class HudNav's
-                // own doc says it exists to kill. Strictly the EDGE: as a steady state it also
+                // own focus-reset contract exists to kill. Strictly the EDGE: as a steady state it also
                 // fired on a user who walked UP to the discs on purpose, yanking the ring back
                 // the same frame and making OK on a disc unreachable by remote.
-                player.hud.nav = HudNav::HOME;
+                player.request_hud_focus(plx_screens::player::HudFocusRequest::Home);
             }
             player.hud.was_standin = !fr.ctrl.is_discs();
             player.publish();
@@ -2008,10 +2007,11 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             let paused_now = paused();
             if let Some(player) = super::bridge::player_mut(&mut app.pages) {
                 if player.up_next.armed() {
+                    let focus = player.hud_focus();
                     if plx_appkit::up_next::countdown_may_run(
                         bare,
-                        player.hud.nav.focus == 1,
-                        player.hud.nav.btn,
+                        focus.on_secondary(),
+                        focus.secondary_item(),
                     ) {
                         player.hud.dismissed = false;
                         player.hud.extend(fr.now, HUD_LINGER_MS);
@@ -2022,7 +2022,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 // when the HUD auto-hides, park focus back on the scrubber so the next reveal
                 // is clean
                 if !player.hud.visible(&mut app.player.session, fr.now, paused_now) {
-                    player.hud.nav = HudNav::HOME;
+                    player.request_hud_focus(plx_screens::player::HudFocusRequest::Home);
                 }
                 player.publish();
             }
@@ -3072,21 +3072,24 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
                 | AppArg::PersonBio
                 | AppArg::CollectionAbout => crate::focusprobe::Screen::Home,
         };
-        // The probe reads the OWNER, and answers the resting cursor when no player is mounted —
-        // which is what every non-player screen used to read off `App`'s second copy.
+        // The probe reads the OWNER's read-only selection projection, and answers the resting cursor
+        // when no player is mounted — the same values every non-player screen needs for diagnostics.
         let probe_hud = |app: &App| {
             super::bridge::player(&app.pages).map_or(
                 crate::focusprobe::Hud {
-                    focus: HudNav::HOME.focus,
-                    btn: HudNav::HOME.btn,
-                    tab: HudNav::HOME.tab,
+                    focus: plx_screens::player::HudFocusSelection::HOME.focus_index(),
+                    btn: plx_screens::player::HudFocusSelection::HOME.secondary_item(),
+                    tab: plx_screens::player::HudFocusSelection::HOME.tab_item(),
                     visible: false,
                 },
-                |player| crate::focusprobe::Hud {
-                    focus: player.hud.nav.focus,
-                    btn: player.hud.nav.btn,
-                    tab: player.hud.nav.tab,
-                    visible: player.hud.visible(&app.player.session, app.last_input, paused()),
+                |player| {
+                    let focus = player.hud_focus();
+                    crate::focusprobe::Hud {
+                        focus: focus.focus_index(),
+                        btn: focus.secondary_item(),
+                        tab: focus.tab_item(),
+                        visible: player.hud.visible(&app.player.session, app.last_input, paused()),
+                    }
                 },
             )
         };

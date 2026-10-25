@@ -150,6 +150,52 @@ impl Scrub {
         plx_appkit::player_hud::scrub_clamp_target(ns, duration_ns)
     }
 }
+/// An externally requested HUD focus destination. The player owns the representation behind this
+/// seam; callers name the destination rather than assigning the legacy cursor's integer fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudFocusRequest {
+    /// Reset the whole HUD selection to its resting scrubber/first-item state.
+    Home,
+    /// Park focus on the scrubber, preserving the current secondary/tab selections.
+    Scrubber,
+    /// Focus one item in the existing secondary controls row.
+    SecondaryItem(i32),
+    /// Focus one item in the existing Info/Chapters tabs row.
+    TabItem(i32),
+}
+
+/// The read-only projection of the player's HUD selection. The integer indices remain available
+/// for the recorder's established shape, while the region predicates keep application readers from
+/// depending on `HudNav`'s storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HudFocusSelection {
+    focus: i32,
+    secondary_item: i32,
+    tab_item: i32,
+}
+
+impl HudFocusSelection {
+    /// The resting selection used when no player instance is mounted.
+    pub const HOME: Self = Self {
+        focus: 0,
+        secondary_item: 0,
+        tab_item: 0,
+    };
+
+    #[inline]
+    pub fn focus_index(self) -> i32 { self.focus }
+    #[inline]
+    pub fn secondary_item(self) -> i32 { self.secondary_item }
+    #[inline]
+    pub fn tab_item(self) -> i32 { self.tab_item }
+    #[inline]
+    pub fn on_scrubber(self) -> bool { self.focus == 0 }
+    #[inline]
+    pub fn on_secondary(self) -> bool { self.focus == 1 }
+    #[inline]
+    pub fn on_tabs(self) -> bool { self.focus == 2 }
+}
+
 /// The player HUD's focus cursor: WHICH row owns focus, plus the index WITHIN each of the
 /// two indexed rows. One cursor, not three settings — the three are drawn together every
 /// frame (`draw_hud`), moved together by UP/DOWN, and, the reason they are bundled here,
@@ -161,19 +207,42 @@ impl Scrub {
 /// start another, and the first OK opened the track menu instead of pausing. Bundling makes
 /// "reset the HUD focus" one assignment that `start_playback` cannot half-do.
 #[derive(Clone, Copy)]
-pub struct HudNav {
-    pub focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs
-    pub btn: i32,   // 0 = Subtitles, 1 = Audio, 2 = More (within the buttons row)
-    pub tab: i32,   // 0 = Info, 1 = Chapters (within the tabs row)
+pub(crate) struct HudNav {
+    pub(crate) focus: i32, // 0 = scrubber, 1 = right buttons (Subtitles/Audio/More), 2 = bottom tabs
+    pub(crate) btn: i32,   // 0 = Subtitles, 1 = Audio, 2 = More (within the buttons row)
+    pub(crate) tab: i32,   // 0 = Info, 1 = Chapters (within the tabs row)
 }
 impl HudNav {
     /// Focus parked on the scrubber, both indexed rows on their first item — where a fresh
     /// session starts and where an auto-hidden HUD is re-parked.
-    pub const HOME: HudNav = HudNav {
+    pub(crate) const HOME: HudNav = HudNav {
         focus: 0,
         btn: 0,
         tab: 0,
     };
+
+    pub(crate) fn apply_focus_request(&mut self, request: HudFocusRequest) {
+        match request {
+            HudFocusRequest::Home => *self = Self::HOME,
+            HudFocusRequest::Scrubber => self.focus = 0,
+            HudFocusRequest::SecondaryItem(item) => {
+                self.focus = 1;
+                self.btn = item;
+            }
+            HudFocusRequest::TabItem(item) => {
+                self.focus = 2;
+                self.tab = item;
+            }
+        }
+    }
+
+    pub(crate) fn selection(self) -> HudFocusSelection {
+        HudFocusSelection {
+            focus: self.focus,
+            secondary_item: self.btn,
+            tab_item: self.tab,
+        }
+    }
 }
 /// Everything the player remembers ABOUT the transport HUD between frames: its auto-hide deadline,
 /// where its focus cursor is parked, whether the user dismissed it, and the two control-row edges
@@ -188,7 +257,7 @@ impl HudNav {
 /// the tail of the loop.
 pub struct HudState {
     /// the focus cursor, reset per session by `start_playback`
-    pub nav: HudNav,
+    pub(crate) nav: HudNav,
     /// **The auto-hide deadline, as an absolute `SDL_GetTicks` instant** — `0` = expired.
     ///
     /// It was `player::TX.hud_until` and is now this screen's own field (§2.3): the HUD's timer is
