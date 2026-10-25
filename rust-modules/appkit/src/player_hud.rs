@@ -1588,13 +1588,26 @@ impl Drop for SkipIntervalGuard {
 /// Where a scrub target may legally land: never before zero, and never inside the last three
 /// seconds, which is a seek past the point the pipeline can prime from.
 pub fn scrub_clamp_target(ns: i64, duration_ns: i64) -> i64 {
-    let cap = duration_ns - 3_000_000_000;
-    let ns = ns.max(0);
-    if cap > 0 && ns > cap {
-        cap
-    } else {
-        ns
+    if duration_ns <= 0 {
+        return 0;
     }
+    let cap = if duration_ns > 3_000_000_000 {
+        duration_ns - 3_000_000_000
+    } else {
+        duration_ns
+    };
+    ns.clamp(0, cap)
+}
+
+/// Target for a fixed discrete transport skip. `None` means there is no valid duration.
+pub fn discrete_skip_target(position_ns: i64, delta_ns: i64, duration_ns: i64) -> Option<i64> {
+    if duration_ns <= 0 {
+        return None;
+    }
+    Some(scrub_clamp_target(
+        position_ns.saturating_add(delta_ns),
+        duration_ns,
+    ))
 }
 
 /// The transport's dark ground: transparent at its top edge, `theme::scrim_black(0.86)` at the
@@ -2559,6 +2572,78 @@ mod tests {
                 icon_hit(slot, btn_x(i) + BTN_S * 0.5, cy),
                 None,
                 "disc {i} under a stand-in"
+            );
+        }
+    }
+
+    #[test]
+    fn short_duration_clamp_regression() {
+        assert_eq!(
+            super::scrub_clamp_target(3_000_000_000, 2_000_000_000),
+            2_000_000_000
+        );
+    }
+
+    #[test]
+    fn scrub_clamp_covers_duration_and_position_boundaries() {
+        let cases = [
+            (-1, -1, 0),
+            (i64::MAX, 0, 0),
+            (i64::MIN, 1, 0),
+            (i64::MAX, 1, 1),
+            (-1, 2_000_000_000, 0),
+            (i64::MAX, 2_000_000_000, 2_000_000_000),
+            (i64::MIN, 3_000_000_000, 0),
+            (i64::MAX, 3_000_000_000, 3_000_000_000),
+            (-1, 10_000_000_000, 0),
+            (5_000_000_000, 100_000_000_000, 5_000_000_000),
+            (i64::MAX, 100_000_000_000, 97_000_000_000),
+            (i64::MIN, i64::MAX, 0),
+            (i64::MAX, i64::MAX, i64::MAX - 3_000_000_000),
+        ];
+        for (position, duration, expected) in cases {
+            let actual = super::scrub_clamp_target(position, duration);
+            assert_eq!(actual, expected, "position={position}, duration={duration}");
+            assert!(actual >= 0);
+            if duration > 0 {
+                assert!(actual <= duration);
+            }
+        }
+    }
+
+    #[test]
+    fn discrete_skip_targets_saturate_and_share_the_scrub_bound() {
+        use super::discrete_skip_target as target;
+        const S: i64 = 1_000_000_000;
+        assert_eq!(target(5 * S, -10 * S, 100 * S), Some(0));
+        assert_eq!(target(90 * S, 30 * S, 100 * S), Some(97 * S));
+        assert_eq!(target(0, 30 * S, 2 * S), Some(2 * S));
+        assert_eq!(target(i64::MAX, i64::MAX, 100 * S), Some(97 * S));
+        assert_eq!(target(i64::MIN, i64::MIN, 100 * S), Some(0));
+        assert_eq!(target(0, 1, 0), None);
+        assert_eq!(target(0, 1, -1), None);
+    }
+
+    #[test]
+    fn skip_preference_keeps_all_five_scrub_hops_unchanged() {
+        let _lock = plx_base::testlock::serial();
+        use plx_media::route::SkipInterval;
+        for (interval, expected) in [
+            (SkipInterval::Seconds5, 5_000_000_000),
+            (SkipInterval::Seconds10, 10_000_000_000),
+            (SkipInterval::Seconds15, 15_000_000_000),
+            (SkipInterval::Seconds30, 30_000_000_000),
+            (SkipInterval::Seconds60, 60_000_000_000),
+        ] {
+            let _preference = super::SkipIntervalGuard::set(interval);
+            assert_eq!(super::scrub_step_ns(), expected, "{interval:?}");
+            assert_eq!(
+                super::discrete_skip_target(
+                    50_000_000_000,
+                    -10_000_000_000,
+                    100_000_000_000
+                ),
+                Some(40_000_000_000)
             );
         }
     }
