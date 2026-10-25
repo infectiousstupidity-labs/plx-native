@@ -2342,7 +2342,7 @@ mod tests {
                 slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown),
                 slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
             ] {
-                assert_eq!(center_play_pause_rect(1.0).cx(), SCR_W * 0.5, "{} {slot:?}", language.tag());
+                assert_eq!(center_play_pause_rect(1.0).cx(), SCR_W * 0.5, "{}", language.tag());
             }
         }
         assert_eq!(SB_Y, SCR_H - 198.0);
