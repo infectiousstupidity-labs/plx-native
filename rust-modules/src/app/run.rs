@@ -7907,6 +7907,9 @@ mod lifecycle_regression_tests {
         player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RIGHT, 0, true), 48);
         assert!(dispatch_player_sdl(&mut app, 48).is_empty(), "row travel cannot seek/toggle");
         assert_eq!(app.pages.focus().unwrap().elem, 12, "arrow continues from the clicked Audio identity");
+        player_sdl(&mut app, encode_key_repeat(plx_ui::consts::SDLK_LEFT, 0), 56);
+        assert!(dispatch_player_sdl(&mut app, 56).is_empty());
+        assert_eq!(app.pages.focus().unwrap().elem, 12, "legacy row travel accepts a fresh press, not a repeat");
         player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RETURN, 0, true), 64);
         assert_eq!(dispatch_player_sdl(&mut app, 64), vec![PlayerReq::ArmControlRow]);
         player_sdl(&mut app, encode_key_repeat(plx_ui::consts::SDLK_RETURN, 0), 80);

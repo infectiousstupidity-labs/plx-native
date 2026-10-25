@@ -985,7 +985,7 @@ impl PlayerScreen {
                 Handled::Yes
             }
             Key::Up | Key::Down => {
-                if edge == Edge::Up { return Handled::Yes; }
+                if edge != Edge::Down { return Handled::Yes; }
                 if !self.hud.visible_at_press {
                     self.focus_request(HudFocusRequest::Scrubber, fx);
                 } else if at_edge && key == Key::Up && self.hud.nav.focus == 1 {
@@ -1008,7 +1008,7 @@ impl PlayerScreen {
             Key::Left { .. } | Key::Right { .. } => {
                 if self.hud.visible_at_press && self.hud.nav.focus != 0 {
                     self.hud.extend(now, input::HUD_LINGER_MS);
-                    return if edge == Edge::Up { Handled::Yes } else { Handled::No };
+                    return if edge == Edge::Down { Handled::No } else { Handled::Yes };
                 }
                 match edge {
                     Edge::Down => {
