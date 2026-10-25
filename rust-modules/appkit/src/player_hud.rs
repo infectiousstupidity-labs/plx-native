@@ -2337,7 +2337,7 @@ mod tests {
                     assert!(chapter.x + chapter.w <= center.x, "{} Chapters overlaps center: {chapter:?} {center:?}", language.tag());
                 }
             }
-            for slot in [
+            for _slot in [
                 ControlSlot::Discs,
                 slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown),
                 slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
