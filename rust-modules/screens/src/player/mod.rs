@@ -1,7 +1,7 @@
 //! **The player as an owned `Screen`** (restructure spec §9, phase 9).
 //!
 //! `PlayerScreen` is the instance the container mounts for the player route. It owns every piece
-//! of state the route used to keep in two places at once — the HUD's timer, cursor and dismissal,
+//! of state the route used to keep in two places at once — the HUD's timer and dismissal,
 //! the scrub gesture, the held-key timer, the repeat gate, the control row's springs and resume
 //! clock, the Up Next countdown and the image-subtitle texture set — and it draws the whole route:
 //! subtitles, the transport, the read-out, and (through the page-owned `ModalStack`) its overlays.
@@ -12,11 +12,9 @@
 //! region and the capture skip — are the loop's three privileged calls (§3.3 steps 1, 9 and 10) and
 //! are not made here.
 //!
-//! **What is here and what is not.** Phase 9 moves the STATE and the DRAW; the key ladder in
-//! `app/run.rs` remains a CALLER of this screen for the bare transport, exactly as `ui::press`'s
-//! typed facade left the ladders callers of `App.input.press` in phase 2 (§14, "Press during
-//! coexistence"). The overlays are different: they are entries on this page's own
-//! `ModalStack` and own their input outright, so their arms left the ladder with them.
+//! Bare-HUD travel uses the shared dispatcher/FocusEngine. The screen owns scrub gestures,
+//! reveal/hide, Back and transport actions; its legacy draw/probe selection is only a projection
+//! of `Cx.focus`. Overlays remain entries on the page-owned `ModalStack` and own their input.
 //!
 //! Two fields are PUBLISHED rather than owned by `player::TX` (§2.3): `hud.until` and `scrub.ns`.
 //! [`PlayerScreen::publish`] mirrors both into the atomics the draw path and the engine read, and
@@ -109,7 +107,7 @@ pub enum HudPolicy {
 
 pub struct PlayerScreen {
     entry: EntryId,
-    /// The transport HUD's timer, cursor, dismissal and control-row edges.
+    /// The transport HUD's timer, engine projection, dismissal and control-row edges.
     pub hud: HudState,
     /// The scrub-seek gesture, including its preview position.
     pub scrub: Scrub,
@@ -149,7 +147,7 @@ pub struct PlayerScreen {
     repair_scroll: u32,
     /// Which control of the failure read-out's row holds focus — an index into
     /// `player_hud::FailureReadout::actions`, reset to the primary each time a failure takes the
-    /// frame. The screen owns it the way `HudNav` owns the transport's highlight.
+    /// frame. Failure handling retains its existing selection policy; bare-HUD travel is engine-owned.
     failure_sel: usize,
     /// Did a failure own the frame at the last Tick — the edge that resets `failure_sel`.
     failure_up: bool,
@@ -1050,7 +1048,7 @@ impl PlayerScreen {
         if self.take_target(now, fx) {
             // OK confirmed the target and the film plays on from it; that is all this press means
         } else if vis && self.hud.nav.focus == 1 {
-            self.arm_control_row(fx);
+            if (0..self.slot.items()).contains(&self.hud.nav.btn) { self.arm_control_row(fx); }
         } else if vis && self.hud.nav.focus == 2 {
             let kind = if self.hud.nav.tab == 0 {
                 Some(overlay::OverlayKind::Info)
@@ -1934,7 +1932,7 @@ mod step_ladder_tests {
         page.hud.extend(1_000, input::HUD_LINGER_MS);
     }
 
-    /// The external HUD seam keeps the old three-region behavior while hiding the cursor storage:
+    /// The external HUD seam delivers engine Enter requests and derives its selection projection:
     /// item requests select a region, a scrubber request preserves remembered row items, and a
     /// home request is the explicit reset used by stand-in disappearance and auto-hide.
     #[test]
@@ -2488,6 +2486,28 @@ mod step_ladder_tests {
         assert_eq!(page.hud.nav.focus, 0, "tabs -> scrubber");
     }
 
+    #[test]
+    fn remembered_secondary_reentry_reconciles_a_changed_control_slot_before_ok() {
+        let _g = plx_base::testlock::serial();
+        let mut page = PlayerScreen::new(ENTRY);
+        fresh(&mut page);
+        request(&mut page, HudFocusRequest::SecondaryItem(2));
+        press(&mut page, SDLK_DOWN, 0, Edge::Down);
+        page.slot = player_hud::slot_for(Some(plx_data::metadata::Marker {
+            kind: plx_data::metadata::MarkerKind::Intro, start_ms: 0, end_ms: 10_000, final_seg: false,
+        }), false, plx_media::route::NextEpisodeMode::Countdown);
+        let mut engine = engine_for(&page);
+        let owner = InputOwner::Entry(ENTRY);
+        let mut context = cx(); context.focus = engine.read(owner);
+        let mut links = Vec::new(); Screen::<TestHost>::links(&page, &mut links);
+        let plx_ui::focus::Outcome::Moved { to, .. } = engine.move_dir(owner, &page, &links, Dir::Up, &context) else { panic!("row reentry") };
+        assert_eq!(to.elem, player_hud::ELEM_ROW_BASE);
+        assert!(Focusable::<TestHost>::place(&page, &to.elem, &context, At::Drawn).is_some());
+        page.project_focus(&engine.read(owner));
+        assert_eq!(press(&mut page, SDLK_RETURN, 0, Edge::Down).1, vec![PlayerReq::ArmControlRow],
+            "the immediately queued OK arms the available item, not the vanished More disc");
+    }
+
     /// OK on the control row is the DEFERRED press (`ArmControlRow`), not an immediate action —
     /// port of `key_ok`'s `focus == 1` arm.
     #[test]
@@ -2569,6 +2589,13 @@ mod step_ladder_tests {
         Focusable::<TestHost>::groups(&page, &cx(), &mut groups);
         assert!(groups.len() >= 3, "scrubber, control row, tabs at least");
         for g in &groups {
+            for index in 0..g.len as u32 {
+                let elem = PlayerScreen::elem_of(g.id, index);
+                assert_eq!(Focusable::<TestHost>::group_of(&page, &elem, &cx()), Some(g.id));
+                for at in [At::Drawn, At::SpringTarget] {
+                    assert!(Focusable::<TestHost>::place(&page, &elem, &cx(), at).is_some());
+                }
+            }
             let seated = Focusable::<TestHost>::seat(
                 &page,
                 g.id,

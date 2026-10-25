@@ -1,6 +1,6 @@
 //! **The player's INPUT state, owned by [`crate::player::PlayerScreen`]** (restructure
 //! spec §9, phase 9): the held-key timer, the repeat gate, the scrub gesture, the HUD's focus
-//! cursor and the HUD's own timer/dismissal state.
+//! projection and the HUD's own timer/dismissal state.
 //!
 //! Every type here was a `plex_run` loop local through phase 1b-i and an `App` field from 1b-ii
 //! on; phase 9 moves them into the player's `Screen` instance unchanged, which is what §2.2 means
@@ -235,19 +235,15 @@ impl HudNav {
         }
     }
 }
-/// Everything the player remembers ABOUT the transport HUD between frames: its auto-hide deadline,
-/// where its focus cursor is parked, whether the user dismissed it, and the two control-row edges
-/// the per-frame block near the bottom of the loop compares against this frame's slot.
-///
-/// The cursor keeps its own type ([`HudNav`]) rather than dissolving into fields here: the
-/// helpers take it as `&mut HudNav`, and one of them (`start_playback`) is where the per-session
-/// reset happens.
+/// The HUD's timer/dismissal state and offer edges, alongside the engine-derived draw/probe
+/// projection. Navigation and remembered selections belong exclusively to the shared engine;
+/// `HudNav` is refreshed from `Cx.focus` at delivery, never used as another mutable cursor.
 ///
 /// Named `HudState` and not `Hud` so it does not read as `focusprobe::Hud`, which is that
 /// module's own snapshot of the cursor plus a computed `visible`, built beside this one at
 /// the tail of the loop.
 pub struct HudState {
-    /// the focus cursor, reset per session by `start_playback`
+    /// Read-only legacy draw/recorder projection, refreshed from engine deliveries.
     pub(crate) nav: HudNav,
     /// **The auto-hide deadline, as an absolute `SDL_GetTicks` instant** — `0` = expired.
     ///
@@ -401,7 +397,8 @@ impl HudState {
     /// remote, and it must clear it too — which is also what makes an offer behave the same
     /// whether the HUD auto-hid or was hidden on purpose.
     ///
-    /// Parking is only ever from REST: a user who walked to the Subtitles disc or an Info tab keeps
+    /// `PlayerScreen::raise_for_offer` requests engine seating only from REST: a user who walked
+    /// to the Subtitles disc or an Info tab keeps
     /// their spot (and for Up Next thereby declines the countdown — the same one rule, read as a
     /// steady state one block below). `primary` is the occupant's own
     /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a Skip pill, the
@@ -570,7 +567,7 @@ mod hud_visibility_tests {
     ///
     /// The pairing is the point: whatever the cursor is parked on, an invisible transport takes the
     /// press for itself, and the SAME cursor acts normally the moment the transport is on screen.
-    /// Focus survives an auto-hide (`HudNav::HOME` is re-parked one block down in the loop), so
+    /// Focus survives an auto-hide (the loop requests engine Home seating), so
     /// "hidden but focus == 1" is an ordinary state, not a corner.
     #[test]
     fn a_hidden_hud_spends_the_press_on_itself() {

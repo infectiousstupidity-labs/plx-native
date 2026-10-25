@@ -1174,8 +1174,8 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // that is open and returned; the fall-through, which a surface cannot perform, is
         // `PlayerReq::Transport` — see `screens::player::overlay`'s module doc.)
         // (The player's UP/DOWN arm stood here. It walked the HUD ring on the mounted
-        // `PlayerScreen`'s own `hud`/`scrub` — which the page also does, from `key_updown`, for the
-        // same key — and was unreachable behind `tree_owns_key` above from the moment the page
+        // `PlayerScreen`'s own `hud`/`scrub`. Bare-HUD travel is now declared to the shared engine;
+        // that old ladder was unreachable behind `tree_owns_key` above from the moment the page
         // answered `FocusSource::Engine`. Deleted in phase 12, PX-PLAYER.)
         // `Route::Search` is deliberately absent here (phase 6/7 Search cutover, mirroring
         // `Route::Login | Route::Profiles` above): Search is unconditionally an OWNED screen
@@ -1943,6 +1943,9 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // and the previous bool implemented neither of the ones its comment promised.
         let mut focus_request = None;
         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
+            // Publish the once-sampled occupant before Enter/input delivery, so engine seating
+            // and activation use the same item count that this frame will draw.
+            player.slot = fr.ctrl;
             // Keyed on the SEGMENT, not the slot, and `last_offer` is only ever advanced to
             // a real offer — never cleared back to None. `active_marker` is gated on `is_playing`,
             // so a momentary drop out of Playing mid-segment reads as "no segment" and flips the
@@ -2473,17 +2476,6 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         crate::lab::update(fr.now);
         #[cfg(feature = "threadcheck")]
         plx_ui::runtime_warning::update(app.boot_initial.is_some());
-        // The Up Next countdown and the control row's focus pop are the PLAYER INSTANCE's and
-        // are stepped from its own `Tick` for the reason `TransportRow::step` gives — the row is
-        // not drawn on every frame of the route, so a spring advanced in the draw would run at a
-        // rate that depended on which panel was open. What the loop still owes the instance is
-        // this frame's ONE resolve of the control-row slot (`slot()`'s own doc: `playpos_ns` is
-        // written by LG's media thread and `player::pump` runs between the input handlers and
-        // the draw, so re-deriving it per call site let a keypress dispatch to a control the
-        // same frame then declined to draw).
-        if let Some(player) = super::bridge::player_mut(&mut app.pages) {
-            player.slot = fr.ctrl;
-        }
         // Async play resolve: install the worker's plan and start the engine. Permission comes
         // from the window/playback lifecycle, independently of which screen is mounted.
         // A fresh accepted resolve owns a different playback from any parked foreground retry.
