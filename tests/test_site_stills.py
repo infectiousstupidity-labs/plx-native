@@ -37,15 +37,22 @@ class FileSet(unittest.TestCase):
         film = {p for p in committed if p.startswith("site/media/feel")}
         # the stills' manifest is written by `adopt` beside the stills, not rendered as one
         film.add("site/media/stills.manifest.json")
-        # what is committed and in neither set is the film, the stills' manifest and the photograph taken on the
-        # television, nothing else
-        self.assertEqual(committed - auto - manual - film, {"docs/screenshots/navblur-transition.jpg"})
+        # What is committed and in neither set is the film, the stills' manifest, and these non-generated
+        # references, nothing else. The owner-supplied HUD composite is a design reference, not a simulator still
+        # or a manual scene; neither output set may take ownership of it.
+        non_generated_references = {
+            "docs/screenshots/navblur-transition.jpg",  # photograph taken on the television
+            "docs/screenshots/player-hud/plx-native-player-hud.png",  # owner-supplied design reference
+        }
+        self.assertEqual(committed - auto - manual - film, non_generated_references)
+        self.assertFalse((auto | manual) & non_generated_references)
         self.assertLessEqual(auto | manual, committed)
 
-    def test_the_film_and_the_television_photograph_are_never_in_a_set(self):
+    def test_the_film_and_non_generated_references_are_never_in_a_set(self):
         for p in ss.output_files() + ss.output_files(manual=True):
             self.assertNotIn("feel", p.split("/")[-1])
             self.assertNotIn("navblur", p)
+            self.assertNotIn("player-hud/plx-native-player-hud.png", p)
 
     def test_every_simulator_scene_is_automated_and_only_the_television_photograph_is_manual(self):
         self.assertEqual(ss.MANUAL_SCENES, {})
