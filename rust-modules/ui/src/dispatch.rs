@@ -2094,7 +2094,8 @@ where
                 rig.system_keyboard(up);
             }
             (MachineId::Instance(instance), Delivery::Press { id, key, held }) => {
-                let valid_owner = !self.input.keyboard && self.owner_entry() == Some(key.entry)
+                let valid_owner = !self.input.keyboard && self.input.engine.pending_link().is_none()
+                    && self.owner_entry() == Some(key.entry)
                     && self.nav.instance_of(key.entry) == Some(instance)
                     && self.focus() == Some(key);
                 let valid_key = valid_owner && {
@@ -2370,6 +2371,7 @@ where
                         view.page.links(&mut links);
                         engine.move_dir(owner, view, &links, dir, cx)
                     });
+                    if self.input.engine.pending_link().is_some() { self.input.cancel_press(); }
                     if self.input.engine.take_fell_back() {
                         rig.log("focus: no current focus — seated by the first group's policy");
                     }
@@ -2575,7 +2577,6 @@ where
                     let mut groups = Vec::new();
                     view.groups(&cx, &mut groups);
                     matches!(answer.outcome, Outcome::Nothing) && answer.focus == Some(pending.source)
-                        && answer.group == Some(pending.link.from)
                         && ((phase == 1 && dir == Some(pending.link.dir))
                             || (phase == 2 && before_pending == Some(pending)))
                         && self.input.engine.valid_link_wait(pending, owner, &view, &links, &cx)

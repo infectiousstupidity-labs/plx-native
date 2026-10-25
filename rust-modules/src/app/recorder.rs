@@ -363,7 +363,7 @@ impl ResolutionWire {
         let pending = pending.map(|(owner,source,from,dir,to)| {
             use plx_ui::screen::{Dir,Link};
             if phase == 0 || owner != entry || source.0 != entry || Some(source) != focus
-                || group != Some(from) || from == to || !matches!(outcome,Outcome::Nothing) {
+                || group.is_some_and(|g| g != from) || from == to || !matches!(outcome,Outcome::Nothing) {
                 return Err("invalid linked wait identity");
             }
             let dir = match dir { 0=>Dir::Up,1=>Dir::Down,2=>Dir::Left,3=>Dir::Right,

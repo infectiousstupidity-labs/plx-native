@@ -48,8 +48,7 @@ pub enum Outcome<K> {
     Nothing,
 }
 
-/// The current key per input scope plus every group's remembered cursor — logical state
-/// (hashed, restored, recorded). Explicitly ordered sequences, never a map (§5.4).
+/// A declared directional journey waiting only for the owner's existing presentation motion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkWait<K> {
     pub owner: InputOwner,
@@ -57,6 +56,8 @@ pub struct LinkWait<K> {
     pub link: Link,
 }
 
+/// The current key per input scope plus every group's remembered cursor — logical state
+/// (hashed, restored, recorded). Explicitly ordered sequences, never a map (§5.4).
 pub struct FocusEngine<K> {
     /// One transient declared travel intent, never another current/remembered cursor.
     link_wait: Option<LinkWait<K>>,
