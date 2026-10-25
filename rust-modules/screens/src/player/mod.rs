@@ -338,6 +338,14 @@ impl PlayerScreen {
         }
     }
 
+    /// Host fixtures present the production stop census without requiring a GL/video context.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hud_stops_for_test<H: PlayerLike + crate::registry::MetadataLike>(&self, cx: &Cx<'_, H>) -> Vec<Stop<u32>> {
+        let mut frame = DrawFrame::new(cx, plx_ui::Painter::root());
+        self.record_stops(&mut frame, self.hud_drawn(H::session(cx), cx.tick.ms));
+        frame.into_stops()
+    }
+
     /// Is group `g` on screen this frame — the same gates `player_hud::draw_hud`/`draw_readout`
     /// paint behind. A failure owns the frame outright; the scrubber and control row are the
     /// transport's MIDDLE, which an open Info card or Chapters strip hides.

@@ -7872,6 +7872,84 @@ mod lifecycle_regression_tests {
         }
     }
 
+    /// Use the very same stop registration as the visible old HUD; never plant a fake button.
+    fn present_player_hud_stops(app: &mut App, now: u32) -> Vec<plx_ui::screen::Stop<u32>> {
+        use plx_ui::dispatch::Rig;
+        let entry = app.pages.nav.top_page().unwrap().id;
+        let focus = app.pages.input.engine.read(plx_machine::machine::InputOwner::Entry(entry));
+        let split = app.bridge.split();
+        let context = plx_machine::machine::Cx::<super::super::bridge::AppHost> {
+            views: split.views, measure: split.measure, focus, press: Default::default(),
+            owner: plx_machine::machine::InputOwner::Entry(entry),
+            tick: plx_machine::machine::Tick { ms: now, dt_us: 16_000 },
+        };
+        let stops = super::super::bridge::player(&app.pages).unwrap().hud_stops_for_test(&context);
+        app.pages.input.hit.fill(stops.clone());
+        app.pages.input.hit.swap();
+        stops
+    }
+
+    #[test]
+    fn player_hud_pointer_identity_survives_arrows_and_ok() {
+        use plx_screens::registry::PlayerReq;
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::set(true);
+        let mut app = player_sdl_app();
+        pin_headless_hud(&mut app, 0, None);
+        let stops = present_player_hud_stops(&mut app, 0);
+        let audio = stops.iter().find(|stop| stop.key.elem == 11).expect("the real Audio stop");
+        let (x, y) = plx_base::surface::to_physical(audio.rect.cx(), audio.rect.cy());
+        let pointer = |kind: u32, now: u32, app: &mut App| {
+            let mut bytes = [0; 128];
+            bytes[..4].copy_from_slice(&kind.to_ne_bytes());
+            bytes[20..24].copy_from_slice(&(x.round() as i32).to_ne_bytes());
+            bytes[24..28].copy_from_slice(&(y.round() as i32).to_ne_bytes());
+            player_sdl(app, bytes, now);
+        };
+        pointer(SDL_MOUSEBUTTONDOWN, 16, &mut app);
+        assert_eq!(dispatch_player_sdl(&mut app, 16), vec![PlayerReq::ArmControlRow]);
+        assert_eq!(app.pages.focus().unwrap().elem, 11, "click seats the engine, not a second cursor");
+        assert_eq!(super::super::bridge::player(&app.pages).unwrap().hud_focus().secondary_item(), 1);
+        pointer(SDL_MOUSEBUTTONUP, 32, &mut app);
+        assert!(dispatch_player_sdl(&mut app, 32).is_empty(), "release cannot activate a second time");
+        player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RIGHT, 0, true), 48);
+        assert!(dispatch_player_sdl(&mut app, 48).is_empty(), "row travel cannot seek/toggle");
+        assert_eq!(app.pages.focus().unwrap().elem, 12, "arrow continues from the clicked Audio identity");
+        player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RETURN, 0, true), 64);
+        assert_eq!(dispatch_player_sdl(&mut app, 64), vec![PlayerReq::ArmControlRow]);
+        player_sdl(&mut app, encode_key_repeat(plx_ui::consts::SDLK_RETURN, 0), 80);
+        player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RETURN, 0, false), 96);
+        assert!(dispatch_player_sdl(&mut app, 96).is_empty(), "repeat/release never double-arms the legacy deferred press");
+        unsafe { activate_player_row(&mut app.player, &mut app.adapters.player,
+            &mut app.repause_at, plx_appkit::player_hud::ControlSlot::Discs, 100,
+            &mut app.refresh_hubs, &mut app.pages, &mut app.bridge); }
+        frame(&mut app, 112);
+        assert_eq!(super::super::bridge::player_overlay_kind(&app.pages),
+            Some(plx_screens::player::overlay::OverlayKind::More { quality: false }),
+            "the deferred commit opens the highlighted More action");
+    }
+
+    #[test]
+    fn player_hud_leaving_scrub_restores_chrome_without_overriding_engine_travel() {
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::set(false);
+        let mut app = player_sdl_app();
+        let old_duration = plx_media::player::SHARED.duration_ns.swap(100_000_000_000, std::sync::atomic::Ordering::Relaxed);
+        pin_headless_hud(&mut app, 0, None);
+        player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_RIGHT, 0, true), 16);
+        assert!(dispatch_player_sdl(&mut app, 16).is_empty());
+        for now in (32..=320).step_by(16) { frame(&mut app, now); }
+        assert!(present_player_hud_stops(&mut app, 320).iter().all(|stop| stop.key.elem == 0), "scrub has faded the chrome");
+        player_sdl(&mut app, encode_key(plx_ui::consts::SDLK_UP, 0, true), 336);
+        assert!(dispatch_player_sdl(&mut app, 336).is_empty());
+        assert_eq!(app.pages.focus().unwrap().elem, 10);
+        assert!(!super::super::bridge::player(&app.pages).unwrap().scrub.is_live(), "leaving cancels, never commits");
+        for now in (352..=800).step_by(16) { frame(&mut app, now); }
+        assert_eq!(app.pages.focus().unwrap().elem, 10, "no app writer overrides travel on the next frame");
+        assert!(present_player_hud_stops(&mut app, 800).iter().any(|stop| stop.key.elem == 10), "normal motion restores the destination's chrome");
+        plx_media::player::SHARED.duration_ns.store(old_duration, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Puts the Next episode preference back whatever the test did.
     struct NextEpisodeGuard(plx_media::route::NextEpisodeMode);
     impl NextEpisodeGuard {
