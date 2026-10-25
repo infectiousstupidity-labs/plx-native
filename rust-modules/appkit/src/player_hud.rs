@@ -18,7 +18,7 @@ use plx_ui::consts::{SCR_H, SCR_W};
 use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::theme;
 use plx_ui::widgets::{
-    ControlGround, Spinner, StatusKind, StatusOverlay, TabPill, TransportButton,
+    CircleButton, ControlGround, Spinner, StatusKind, StatusOverlay, TabPill, TransportButton,
 };
 use plx_ui::{Env, Painter, Rect, View};
 use std::ffi::CString;
@@ -472,7 +472,13 @@ pub const fn sb_w() -> f32 {
 }
 const SB_Y: f32 = SCR_H - 198.0;
 const SB_H: f32 = 8.0;
-const BTN_S: f32 = 64.0; // right-side control button size (mockup ≈ 68)
+const BTN_S: f32 = 64.0; // shared HUD control diameter
+/// Stable player-focus identity range reserved for the centered transport group.
+pub const ELEM_CENTER_BASE: u32 = 40;
+/// The task05 group contains only its centered Play/Pause action.
+pub const ELEM_CENTER_PLAY_PAUSE: u32 = 41;
+/// Exclusive end of the centered transport identity range (rewind/forward belong to task06).
+pub const ELEM_CENTER_END: u32 = 43;
 const BTN_Y: f32 = HUD_CONTROLS_TOP_Y;
 
 // The control row, exported for `skip_pill` — while a marker is under the playhead the Skip button
@@ -515,6 +521,7 @@ pub type RowPop = plx_ui::widgets::CtlPop<{ BTN_N as usize }>;
 /// exactly where [`step`](Self::step)'s doc says they must be.
 pub struct TransportRow {
     pop: RowPop,
+    center_pop: plx_ui::widgets::CtlPop<1>,
     /// The paused title's one-shot reveal clock; no motion remains after it reaches the end.
     title_clock: plx_ui::marquee::Clock,
     /// **The measured width of every control-row stand-in label seen so far** — a RENDER memo, the
@@ -551,6 +558,7 @@ impl TransportRow {
     pub fn new() -> Self {
         Self {
             pop: RowPop::new(),
+            center_pop: plx_ui::widgets::CtlPop::new(),
             title_clock: plx_ui::marquee::Clock::new(),
             widths: Vec::new(),
             play_at: None,
@@ -589,6 +597,22 @@ impl TransportRow {
             .flatten()
             .filter(|&i| i < slot.items().max(0) as usize);
         self.pop.step(f, dt);
+    }
+
+    /// Step the centered action's focus pop from the owning screen's Tick. Like the right row,
+    /// this spring is never advanced by painting.
+    pub fn step_center(&mut self, focused: bool, dt: f32) {
+        self.center_pop.step(focused.then_some(0), dt);
+    }
+
+    /// Center Play/Pause's focus scale with the captured press dip applied by the shared control pop.
+    pub fn center_scale(&self, press_scale: f32) -> f32 {
+        self.center_pop.scale_with(0, press_scale)
+    }
+
+    /// Focus fill from the same shared spring that determines the button's scale.
+    fn center_focus(&self) -> f32 {
+        self.center_pop.focus(0)
     }
 
     /// Do the title block, control row and bottom tabs take the pointer? Not while a scrub has
@@ -1342,6 +1366,38 @@ pub fn ctrl_row_hit_rect() -> Rect {
     Rect::new(CTRL_RIGHT - w, CTRL_Y, w, CTRL_H)
 }
 
+/// The stable center-button rectangle shared by painting and player focus/hit placement.
+/// Its single 64px item is centered with the same HStack contract used by other HUD rows.
+pub fn center_play_pause_rect(scale: f32) -> Rect {
+    const ITEM: [Item; 1] = [Item::new(BTN_S)];
+    let (x, w) = HStack::new(&ITEM, plx_ui::widgets::CONTROL_GAP, Align::Centre(SCR_W * 0.5))
+        .span(0)
+        .expect("the centered Play/Pause slot is present");
+    let base = Rect::new(x, tab_y(), w, BTN_S);
+    let s = scale.max(0.0);
+    Rect::new(base.cx() - base.w * s * 0.5, base.cy() - base.h * s * 0.5, base.w * s, base.h * s)
+}
+
+/// Whether the centered transport may be drawn, focused, hit, or activated this frame.
+/// `frame_owned` is the failure/repair surface gate; `seen_frame` distinguishes warm busy states
+/// from cold loading, while Paused remains eligible even before the first presented frame.
+pub fn center_transport_available(
+    state: plx_media::player::PlaybackState,
+    seen_frame: bool,
+    hud_drawn: bool,
+    transport: bool,
+    frame_owned: bool,
+    chrome_interactive: bool,
+) -> bool {
+    use plx_media::player::PlaybackState as S;
+    hud_drawn
+        && transport
+        && !frame_owned
+        && chrome_interactive
+        && (matches!(state, S::Playing | S::Paused)
+            || (seen_frame && matches!(state, S::Buffering | S::Seeking)))
+}
+
 /// One bottom tab's rect, matching the left-to-right layout [`draw_hud`] lays the pills out with.
 pub fn tab_hit_rect(idx: i32, has_chapters: bool, measure: &dyn plx_machine::machine::Measure) -> Option<Rect> {
     let tabs = tab_labels(has_chapters);
@@ -1983,6 +2039,8 @@ pub fn draw_hud(
     transport: bool,
     measure: &dyn plx_machine::machine::Measure,
     meta: plx_data::metadata::MetadataView<'_>,
+    center_available: bool,
+    center_press_scale: f32,
 ) {
     // A FAILURE owns the frame, and it outranks every branch below — including the Up Next card,
     // which cannot coexist with one but must not be the arm that decides so. `Player Screen.dc.html`
@@ -2080,6 +2138,22 @@ pub fn draw_hud(
                     }
                 }
             }
+        }
+
+        if center_available && chrome {
+            let icon = if plx_media::player::TX.paused.load(Relaxed) {
+                plx_ui::icons::Icon::Play
+            } else {
+                plx_ui::icons::Icon::Pause
+            };
+            CircleButton::new(c"".as_ptr())
+                .icon(icon)
+                .frame(center_play_pause_rect(1.0))
+                .focused(focus == 3)
+                .focus_mix(row.center_focus())
+                .ground(ControlGround::Unkeyed)
+                .scale(row.center_scale(center_press_scale))
+                .draw(&e, pc);
         }
 
         let mut bar = Playbar::live(ps, busy, focus, row.since_play_ms(now), now);
@@ -2203,6 +2277,102 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn center_play_pause_geometry() {
+        use super::*;
+        assert_eq!(ELEM_CENTER_BASE, 40);
+        assert_eq!(ELEM_CENTER_PLAY_PAUSE, 41);
+        assert_eq!(ELEM_CENTER_END, 43);
+        let rest = center_play_pause_rect(1.0);
+        assert_eq!(rest.cx(), SCR_W * 0.5);
+        assert_eq!(rest.y, tab_y());
+        assert_eq!((rest.w, rest.h), (64.0, 64.0));
+        for scale in [1.0, 1.07, 0.94] {
+            let r = center_play_pause_rect(scale);
+            assert!((r.cx() - SCR_W * 0.5).abs() < 0.001);
+            assert!((r.cy() - rest.cy()).abs() < 0.001);
+            assert!((r.w - rest.w * scale).abs() < 0.001);
+            assert!((r.h - rest.h * scale).abs() < 0.001);
+        }
+        assert_eq!(center_play_pause_rect(0.0).cx(), SCR_W * 0.5);
+        assert_eq!(center_play_pause_rect(-1.0).w, 0.0);
+        assert_eq!(SB_Y, SCR_H - 198.0, "the established scrub band remains unchanged");
+    }
+
+    #[test]
+    fn center_transport_availability() {
+        use plx_media::player::PlaybackState as S;
+        use super::center_transport_available as available;
+        for state in [S::Idle, S::Error, S::Resolving, S::Connecting] {
+            assert!(!available(state, true, true, true, false, true), "{state:?}");
+        }
+        assert!(!available(S::Buffering, false, true, true, false, true));
+        assert!(!available(S::Seeking, false, true, true, false, true));
+        for state in [S::Playing, S::Paused] {
+            assert!(available(state, false, true, true, false, true), "{state:?}");
+        }
+        for state in [S::Buffering, S::Seeking] {
+            assert!(available(state, true, true, true, false, true), "{state:?}");
+        }
+        for state in [S::Playing, S::Paused, S::Buffering, S::Seeking] {
+            assert!(!available(state, true, false, true, false, true), "HUD hidden: {state:?}");
+            assert!(!available(state, true, true, false, false, true), "transport withheld: {state:?}");
+            assert!(!available(state, true, true, true, true, true), "frame owned: {state:?}");
+            assert!(!available(state, true, true, true, false, false), "chrome fading: {state:?}");
+        }
+    }
+
+    #[test]
+    fn center_play_pause_locales_and_clearance() {
+        use plx_base::fontcov::advances::ShippedMeasure;
+        let measure = ShippedMeasure;
+        let center = super::center_play_pause_rect(1.0);
+        for language in plx_platform::i18n::SHIPPED {
+            let _language = plx_platform::i18n::language_on_this_thread_for_test(language);
+            for chapters in [false, true] {
+                let info = tab_hit_rect(0, chapters, &measure).unwrap();
+                assert!(info.x + info.w <= center.x, "{} Info overlaps center: {info:?} {center:?}", language.tag());
+                if chapters {
+                    let chapter = tab_hit_rect(1, true, &measure).unwrap();
+                    assert!(chapter.x + chapter.w <= center.x, "{} Chapters overlaps center: {chapter:?} {center:?}", language.tag());
+                }
+            }
+            for slot in [
+                ControlSlot::Discs,
+                slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown),
+                slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
+            ] {
+                assert_eq!(center_play_pause_rect(1.0).cx(), SCR_W * 0.5, "{} {slot:?}", language.tag());
+            }
+        }
+        assert_eq!(SB_Y, SCR_H - 198.0);
+    }
+
+    #[test]
+    fn center_play_pause_motion_runs_and_rests() {
+        let mut row = TransportRow::new();
+        assert_eq!(row.center_scale(1.0), 1.0);
+        row.step_center(true, 1.0 / 60.0);
+        let first = row.center_scale(1.0);
+        assert!(first > 1.0 && first < plx_ui::widgets::CTRL_FOCUS_SCALE);
+        let mut previous = first;
+        let mut changed = false;
+        for _ in 0..120 {
+            row.step_center(true, 1.0 / 60.0);
+            let current = row.center_scale(1.0);
+            changed |= (current - previous).abs() > 0.0001;
+            previous = current;
+        }
+        assert!(changed, "the focus pop must continue to request visible motion");
+        assert!((previous - plx_ui::widgets::CTRL_FOCUS_SCALE).abs() < 0.001);
+        row.step_center(false, 1.0 / 60.0);
+        for _ in 0..120 {
+            row.step_center(false, 1.0 / 60.0);
+        }
+        assert!((row.center_scale(1.0) - 1.0).abs() < 0.001, "the pop rests after focus leaves");
+        assert!((row.center_scale(0.92) - row.center_scale(1.0) * 0.92).abs() < 0.001);
+    }
+
     #[test]
     fn a_hold_doubles_its_scrub_speed_every_step_up_to_the_cap() {
         use super::{scrub_speed, SCRUB_BASE, SCRUB_MAX, SCRUB_STEP_MS};
