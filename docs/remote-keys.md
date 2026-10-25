@@ -111,6 +111,54 @@ before `SDL_Init` (§5).
 | `415` | either | `Pause` | legacy alternate | evdev 541, unnamed |
 | `413` | either | `Stop` | legacy alternate | evdev 534, unnamed |
 
+### 2.1 Target centered-transport contract (HUD-01; not implemented yet)
+
+> **Status:** target contract for the staged HUD-01 work, not a description of the current
+> implementation or a device-verification claim. The supplied visual reference is
+> [`plx-native-player-hud.png`](screenshots/player-hud/plx-native-player-hud.png); it is a composite,
+> so its top panel establishes the centered three-control row rather than absolute coordinates or
+> later chapter/detail work.
+
+The future visible HUD adds one centered group below the existing scrubber: **Rewind 10 seconds →
+Play/Pause → Forward 30 seconds**. It is independent of the right-side Subtitles/Audio/More cluster;
+those existing secondary controls remain where they are. Previous and Next are deliberately absent
+until they have genuine actions. The elapsed-clock state glyph remains a non-action read-out.
+
+- The on-screen side actions have fixed **−10 s** and **+30 s** intervals. They do not read, write,
+  or alter Settings > Playback > **Skip interval**, whose 5/10/15/30/60 s value remains exclusively
+  the configurable LEFT/RIGHT scrub-preview step.
+- A valid discrete skip starts at `player::intended_pos_ns(session)`, applies its signed fixed delta
+  with saturating arithmetic, then uses the shared scrub clamp. It emits exactly one
+  `PlayerReq::CommitSeek(target)`, which preserves pause; it does not emit `SeekTo`, a synthetic
+  transport request, or a direct media/FFI call. `SeekTo` remains the pending key-scrub confirmation
+  path and resumes a paused film.
+- The common bound reserves the final three seconds for positive durations above three seconds
+  (`duration - 3 s`); a positive duration at or below three seconds caps at its duration; an
+  invalid/non-positive duration offers no discrete skip. No target is negative or exceeds duration.
+- Play/Pause derives its action glyph from the existing viewer-pause state (Pause while playing,
+  Play while paused), emits exactly one `PlayerReq::Transport(None)`, and leaves the state glyph and
+  elapsed-clock behavior intact. Hardware Play, Pause, PlayPause, FF and Rewind keep their existing
+  contracts. A pending key-scrub target is still confirmed through `SeekTo` by OK/Play/PlayPause;
+  Pause does not confirm it.
+- Leaving the scrubber for this group cancels, never commits, a pending key or pointer preview.
+  The button then acts from the intended playback position. Repeated accepted skips may coalesce in
+  the existing media seek mailbox; HUD-01 adds no seek queue.
+
+The group is operable only while the HUD/chrome is visible and interactive, the transport middle is
+present, and neither failure/repair nor an overlay owns input. Idle, Error, Resolving, Connecting,
+and cold Buffering without a presented frame expose no center controls. Playing/Paused expose
+Play/Pause; Buffering/Seeking after `seen_frame()` expose it and otherwise-valid skips. Skips also
+require a positive duration and disappear together when it is unknown/non-positive, leaving
+Play/Pause centered. Draw, focus, hit registration, and activation share this policy and activation
+rechecks it, so stale presses cannot act.
+
+The target focus order is **secondary controls → scrubber → center group → Info/Chapters tabs**:
+UP/DOWN moves between adjacent groups, first entry into the center group seats Play/Pause, and
+ordinary LEFT/RIGHT walks Rewind ↔ Play/Pause ↔ Forward without wrap. Secondary's existing top-edge
+hide and tabs' bottom edge remain. Fresh reveal still seats the scrubber; Back first cancels a
+pending scrub, then hides the HUD, then exits when hidden; Stop exits immediately; overlays retain
+input ownership. The shared focus engine, not a parallel screen-local cursor, executes this travel.
+
 ### Bound outside `classify`
 
 | Code | Field | Where | What it does |

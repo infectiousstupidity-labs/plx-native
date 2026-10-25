@@ -469,18 +469,71 @@ or a path — a photograph cannot be redacted after the fact, and it lands in a 
 
 ## 6. Playback control — the answer to checklist #45
 
-### 6.1 The position, stated plainly
+### 6.1 The target centered-transport contract (HUD-01)
 
-**There is no on-screen `<< ⏸ >>` transport button row in this application, and one is not
-planned.**
+> **Status — target, not current behavior:** HUD-01 records the staged implementation contract below.
+> The current HUD remains remote-driven while its tasks land; this section does not claim the new
+> controls exist, have passed host tests, or have received simulator or LG-device verification.
+> The owner-supplied [HUD reference](screenshots/player-hud/plx-native-player-hud.png) is a composite:
+> its top panel establishes this issue's centered transport group, while its chapter/detail panels are
+> out of scope.
 
-Transport is driven from **the remote**, and the HUD shows **state**: a small mark beside the
-elapsed clock, and nothing at all while playback is running steadily.
+The design rule against a transport row has a narrow, explicit exception for one centered group
+below the scrubber: **Rewind 10 seconds / Play–Pause / Forward 30 seconds**. It is centered on the
+screen by itself, not together with the right-side secondary cluster. Subtitles, Audio and More stay
+in that cluster; the clock's state mark remains a non-focusable, non-hit-tested state read-out.
+Previous and Next are not placeholders and must not appear until they have real actions.
 
-This is a design decision, recorded and settled — not an oversight, and not a gap awaiting work. The
-grounds are below, and they are the reason this document exists.
+**Intervals and requests.** The on-screen rewind and forward actions are fixed at **−10 s** and
+**+30 s**. Settings > Playback > Skip interval remains unchanged: its 5/10/15/30/60 s setting is
+only the ordinary LEFT/RIGHT scrub-preview step. An accepted skip starts from
+`player::intended_pos_ns(session)`, uses saturating signed arithmetic and the shared clamp, and
+emits exactly one `PlayerReq::CommitSeek(target)`. `CommitSeek` preserves pause; it is not
+`SeekTo`, a direct media/FFI operation, or a second seek queue. `SeekTo` keeps its existing
+pending-key-scrub confirmation semantics and resumes a paused film. The common clamp retains the
+three-second end margin for durations above three seconds, caps a positive duration of three seconds
+or less at duration, and accepts no skip for invalid/non-positive duration. It never yields a
+negative or over-duration target.
 
-### 6.2 Why this is compliant
+Play/Pause uses the existing viewer-pause state: its action glyph is Pause while playing and Play
+while paused, and each accepted activation emits exactly one `PlayerReq::Transport(None)`. Hardware
+Play, Pause, PlayPause, FF and Rewind retain their existing paths. In particular, a pending
+key-scrub target remains confirmed by OK, Play or PlayPause through `SeekTo`; Pause does not confirm
+it. Moving from the scrubber to a center button cancels, never commits, an outstanding scrub or drag;
+the button then starts from the intended playback position. The state mark still reports elapsed
+transport state rather than becoming the action.
+
+**Availability.** One pure policy governs draw, focus stops, hit registration and activation, with
+a second check at activation. No center control is operable when the HUD is hidden, its transport
+middle is withheld, its scrub chrome is non-interactive, failure/repair owns the frame, or an overlay
+owns input. Idle, Error, Resolving, Connecting and cold Buffering without a presented frame expose
+none. Playing and Paused expose Play/Pause. Buffering or Seeking after `seen_frame()` expose
+Play/Pause and otherwise-valid skips. Both skips additionally require positive duration and vanish
+together when duration is unknown/non-positive, leaving Play/Pause centered. A disappearing focused
+skip falls back to Play/Pause; a disappearing center group falls back to an actually available
+existing group or failure action.
+
+**Navigation.** With the HUD visible, the shared focus engine owns the order
+**secondary controls ↔ scrubber ↔ center group ↔ Info/Chapters tabs**. From the scrubber, Up reaches
+secondary controls and Down enters the center group, initially seating Play/Pause; its ordinary
+Left/Right walks Rewind ↔ Play/Pause ↔ Forward without wrapping. Down from the center group reaches
+the existing tabs; Up returns to the scrubber. Secondary's top edge keeps its hide behavior and the
+tabs' bottom edge stops. Fresh reveal seats the scrubber. Back first cancels a pending scrub, then
+hides a visible HUD, then exits from a hidden HUD; Stop exits immediately; existing overlays retain
+input ownership.
+
+The task sequence must update the current-behavior prose when controls actually land: the
+state-read-out comment in `rust-modules/appkit/src/player_hud.rs`, the current-HUD wording in this
+section, and checklist item 45 in `docs/lg-self-checklist.md`. Historical release notes remain
+historical.
+
+### 6.2 Current rationale and remote-key compliance (pre-HUD-01 implementation)
+
+The following rationale describes the current remote-driven HUD, not the HUD-01 target above.
+Transport is driven from **the remote**, and the HUD shows **state**: a small mark beside the elapsed
+clock, and nothing at all while playback is running steadily.
+
+#### 6.2.1 Why the current implementation is compliant
 
 1. **The keys are what #45 is actually about.** The item's own remark defers movement details to
    this document; what it must be satisfied about is that Play, Pause, Stop, fast-forward and rewind
@@ -504,7 +557,7 @@ grounds are below, and they are the reason this document exists.
    the app is the card hold of §5.6; its actions are otherwise reachable from the detail page, with
    the single exception of *Remove from Deck*.)
 
-### 6.3 The HUD
+### 6.3 The current HUD (pre-HUD-01 implementation)
 
 ![Player HUD](screenshots/player.jpg)
 
@@ -548,7 +601,7 @@ Everything in the control row and the tab row is focusable and activates with OK
 is not focusable and is not hit-tested** — it is a read-out, not a control, which is exactly the
 distinction §6.1 draws.
 
-### 6.4 What each key does during playback
+### 6.4 What each key does during playback (current implementation)
 
 | key | effect |
 |---|---|
@@ -575,7 +628,7 @@ itself. This line said "BACK is the only key that acts" and was true only by acc
 implemented the OK escape carried a guard it could never satisfy, so OK fell through to the ordinary
 transport toggle instead — restructure phase 12 (PX-PLAYER) is where that was found and fixed.
 
-### 6.5 The state mark — what the HUD shows instead of buttons
+### 6.5 The current state mark
 
 One slot, beside the elapsed clock, showing exactly one of:
 
@@ -606,7 +659,7 @@ front of QA:
 - **The play mark clears after two seconds** deliberately. A play glyph held for a whole film would
   be saying "playing" to somebody who is watching a moving picture.
 
-### 6.6 Seeking
+### 6.6 Seeking (current implementation; key-scrub contract retained by HUD-01)
 
 Seeking is a **click-to-confirm** gesture, not one immediate jump per press — and the same one
 whether the film is playing or paused. The remote's keys only move a **target**; the film moves
@@ -653,7 +706,7 @@ up commits the drag. A playing film plays on from the new spot; a paused film se
    confirmation or a pointer drag's release is not followed by a way back to where the scrub
    started; BACK straight afterwards hides the HUD like any other BACK.
 
-### 6.7 The control row — subtitles and audio, and what replaces them
+### 6.7 The current right-side secondary cluster — subtitles, audio, and replacements
 
 The row at the HUD's top right has **three mutually exclusive occupants**, decided by what is under
 the playhead. It is one row, not three stacked controls, and the choice is made once per frame.

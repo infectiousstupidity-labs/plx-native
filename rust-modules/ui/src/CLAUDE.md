@@ -445,12 +445,20 @@ presentation in a design pass.
    `text_view::more_mark()` rather than a screen-local literal — the drift that caused this rule was
    two screens each holding their own copy. A tab pill reading "More" is a pill, not a text mark.
 
-3. **The player HUD gets a state glyph, not a transport row.** No `<<` `||` `>>` `■` buttons. The
-   HUD keeps the small transport *state indicator* past the elapsed clock: a pause glyph while
-   paused, a seek spinner while the transport owns the busy signal, nothing at all while playing.
-   Transport is driven by REMOTE KEYS, which must genuinely work. Any `<<` / `>>` added must be a
-   small glyph in that same indicator slot at the clock's cap height — never a control, and never a
-   fourth entry in the HUD control row (`appkit/player_hud.rs`'s `BTN_N`, currently 3).
+3. **The player HUD keeps its state glyph; transport is normally remote-driven.** The small
+   transport *state indicator* past the elapsed clock remains a read-out: a pause glyph while
+   paused, a seek spinner while the transport owns the busy signal, and nothing while playing.
+   Remote keys must genuinely work. The indicator is never focusable or an action button.
+
+   **Narrow HUD-01 exception (issue #3, target contract):** this rule does not forbid the separately
+   centered, focusable **Rewind 10 seconds / Play–Pause / Forward 30 seconds** group below the
+   scrubber. Its contract, reference asset, availability policy, focus navigation, and request
+   semantics are in [`docs/ux-scenario.md` §6.1](../../../docs/ux-scenario.md#61-the-target-centered-transport-contract-hud-01)
+   and [`docs/remote-keys.md` §2.1](../../../docs/remote-keys.md#21-target-centered-transport-contract-hud-01).
+   That group is the only exception: do not add phantom Previous/Next controls, do not duplicate
+   Subtitles/Audio/More outside their right-side secondary cluster, and do not turn the clock state
+   read-out into an action. Until the staged HUD tasks land, the existing HUD remains the current
+   implementation; this is a target contract, not a claim that the controls already exist.
 
 4. **Failure read-outs are never red — the app does not scold.** A read-out's verdict (DS3) is inked `theme::TEXT_PRIMARY`: bright, because it is the line the eye lands on — a `Failed` read-out's verdict, and an `Empty` read-out's caption, which is not bold. Its body, the reason under it, is `theme::TEXT_SECONDARY`. Emphasis is ink only: never a warning colour, a rule, a capsule or a tint. A `Failed` verdict is bold `size::TITLE` (per the design system's `StatusOverlay` contract). Home, Library, sign-in and the player's failure read-outs share ONE placement: the verdict hangs
    from `FULL_ANCHOR_TOP` with the reason and action row stacked directly under it, and a 112 px

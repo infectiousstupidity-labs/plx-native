@@ -139,7 +139,7 @@ skips; a partial green count is not equivalent to 21/21.
 | 27–31, 33 | Magic Remote, pointer, OK, wheel, navigation | Pointer/click and wheel paths are device-proven; the Magic Remote raw capture contains 336 real key lines. |
 | 37 | BACK within the app | BACK returns through the route trail. Home-root behaviour is the separate policy blocker in §2 and is not hidden by this Pass. |
 | 38 | EXIT key | Scancode 505 is bound and device-verified: press → `EXIT key: terminating` → no process. |
-| 45 (remote half) | Playback control keys | Native scancodes for play/pause, stop, rewind and fast-forward are bound and device-proven. The absence of an on-screen transport row is documented in the submitted UX scenario rather than disguised as an implementation gap. |
+| 45 (remote half) | Playback control keys | Native scancodes for play/pause, stop, rewind and fast-forward are bound and device-proven. The current HUD is remote-driven; HUD-01's planned centered Rewind 10 s / Play–Pause / Forward 30 s group is a target contract in `docs/ux-scenario.md` §6.1, not yet a device-verified claim. |
 | 48 | Subtitles | The server matrix passed text and image subtitle paths; music-note coverage is bundled. Subtitle-appearance settings are N/A because the app exposes none. |
 | 49 | Resume | The server matrix passed the PMS-backed `viewOffset` resume path; the harness resets state through `/:/unscrobble`. |
 
@@ -151,9 +151,13 @@ The native Settings Service supplies UI and formatting locales, and the resolved
 becomes `X-Plex-Language` for PMS. Native device checks on 2026-09-27 verified detection, persistence across restarts, Cyrillic
 text, consent scrolling and the contribution QR. See `docs/localization.md` for the scope.
 
-**#45 — on-screen transport controls.** The product deliberately uses a remote-driven, state-only
-transport HUD rather than a focusable Play/Pause/Stop/FF/RW row. The compliance description belongs
-in `docs/ux-scenario.md`, which is what the checklist tells QA to consult for movement details.
+**#45 — on-screen transport controls.** The current product uses a remote-driven, state-only
+transport HUD. HUD-01 has an explicit, staged target contract for a centered Rewind 10 s / Play–Pause
+/ Forward 30 s group; it preserves remote-key behavior, keeps the clock state mark as a read-out,
+and deliberately omits Previous/Next. Until HUD-01 implementation and its separate host/simulator/
+LG-device evidence land, this checklist makes no new on-screen-control verification claim. The
+contract belongs in `docs/ux-scenario.md` §6.1, which is what the checklist tells QA to consult for
+movement details.
 
 Genuinely N/A: #4 advertisement · #11 BACK UI button · #12 EXIT UI button · #18 terms · #19 sign-up
 (account creation happens on plex.tv) · #23 adult authentication · #24 / #25 payment · #32 colour
