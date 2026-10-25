@@ -2139,27 +2139,6 @@ where
                     report.dropped_deliveries += 1;
                     return;
                 }
-                if self.input.engine.pending_link().is_some_and(|p| p.owner != self.owner()) {
-                    self.input.engine.cancel_link_wait();
-                }
-                if self.input.engine.pending_link().is_some() {
-                    match &ev {
-                        ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, edge, .. }, .. }) => {
-                            if *key == Key::Ok {
-                                self.input.engine.cancel_link_wait();
-                                self.input.cancel_press();
-                                return; // before the source screen's raw confirm fallback
-                            }
-                            if *edge == Edge::Repeat { return; }
-                            if *edge == Edge::Down { self.input.engine.cancel_link_wait(); }
-                        }
-                        ScreenEvent::Input(_) | ScreenEvent::Activate(_) | ScreenEvent::Enter(_)
-                        | ScreenEvent::WillLeave(_) | ScreenEvent::Cover | ScreenEvent::Unmount => {
-                            self.input.engine.cancel_link_wait();
-                        }
-                        _ => {}
-                    }
-                }
                 // Ingest releases an already-live gesture before the press Tick. A Down in
                 // THIS input batch creates its arm later, while draining, so apply subsequent
                 // physical edges in delivery order too. These operations are idempotent for
@@ -3692,6 +3671,7 @@ mod linked_wait_tests {
     #[derive(Default)]
     struct Counts { raw_ok: Cell<u32>, commits: Cell<u32>, landings: Cell<u32> }
     impl LogicalState for Counts {
+        fn probe(&self, out: &mut String) { out.push_str(&format!("raw={} commits={} landings={}", self.raw_ok.get(), self.commits.get(), self.landings.get())); }
         fn write(&self, c: &mut Canon) { c.u32(self.raw_ok.get()).u32(self.commits.get()).u32(self.landings.get()); }
     }
     struct ChromeScreen { page: LinkedChrome, counts: Rc<Counts> }
@@ -3723,6 +3703,8 @@ mod linked_wait_tests {
     }
     impl Screen<FixtureHost> for ChromeScreen {
         fn name(&self)->&'static str { "linked-chrome" }
+        fn crumb(&self,_:&Cx<'_,FixtureHost>)->Option<std::borrow::Cow<'_,str>> { None }
+        fn render(&self)->super::super::screen::RenderStrategy { super::super::screen::RenderStrategy::Page }
         fn state(&self)->&dyn LogicalState { &*self.counts }
         fn prepare(&mut self,_:&mut Budget,_:&Cx<'_,FixtureHost>) {}
         fn draw(&mut self,_:&mut DrawFrame<'_, '_,FixtureHost>) {}
