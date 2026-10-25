@@ -517,6 +517,11 @@ pub struct Placed {
 
 /// EVERY method takes `&self`: the engine never mutates a screen (§7.3 step 5 says who does).
 pub trait Focusable<H: Host> {
+    /// Retain a declared link while its destination's existing presentation is restoring.
+    /// This never makes an absent group operable. Opt in only for a logically eligible,
+    /// finite transition; normal frames must already be driven by the owner's motion.
+    fn link_wait(&self, _link: Link, _cx: &Cx<'_, H>) -> bool { false }
+
     fn groups(&self, cx: &Cx<'_, H>, out: &mut Vec<GroupSpec>);
     /// Which group an element belongs to — what the engine consults an `EdgeRule` on.
     fn group_of(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<GroupId>;

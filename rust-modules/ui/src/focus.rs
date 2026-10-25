@@ -816,6 +816,54 @@ mod tests {
         };
     }
 
+    struct LinkedChrome { tree: Tree, ready: bool, eligible: bool }
+    impl LinkedChrome {
+        fn new() -> Self {
+            let mut tree = Tree::new(E);
+            tree.row(1, 1, 0.0, 0.0, 64.0, 64.0, 64.0).spec.edge = [EdgeRule::Stop; 4];
+            let dest = tree.row(2, 3, 0.0, 100.0, 64.0, 64.0, 80.0);
+            dest.spec.seat = Seat::Remembered;
+            dest.spec.elem = ElemKind::Control;
+            Self { tree, ready: false, eligible: true }
+        }
+    }
+    const CHROME_LINK: Link = Link { from: GroupId(1), dir: Dir::Down, to: GroupId(2) };
+    impl Focusable<FixtureHost> for LinkedChrome {
+        fn link_wait(&self, link: Link, _: &Cx<'_, FixtureHost>) -> bool {
+            link == CHROME_LINK && self.eligible && !self.ready
+        }
+        fn groups(&self, cx: &Cx<'_, FixtureHost>, out: &mut Vec<GroupSpec>) {
+            self.tree.groups(cx, out);
+            if !self.ready || !self.eligible { out.retain(|g| g.id != GroupId(2)); }
+        }
+        fn group_of(&self, k: &u32, cx: &Cx<'_, FixtureHost>) -> Option<GroupId> {
+            let g = self.tree.group_of(k, cx)?;
+            (g != GroupId(2) || (self.ready && self.eligible)).then_some(g)
+        }
+        fn neighbour(&self, k: FocusKey<u32>, d: Dir, cx: &Cx<'_, FixtureHost>) -> Step<u32> { self.tree.neighbour(k, d, cx) }
+        fn place(&self, k: &u32, cx: &Cx<'_, FixtureHost>, at: At) -> Option<Placed> {
+            self.group_of(k, cx)?; self.tree.place(k, cx, at)
+        }
+        fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.tree.seat(g, from, cx) }
+        fn reconcile(&self, k: FocusKey<u32>, cx: &Cx<'_, FixtureHost>) -> FocusKey<u32> { self.tree.reconcile(k, cx) }
+    }
+
+    #[test]
+    fn linked_chrome_wait_retries_once() {
+        rig!(m, v, cx);
+        let mut page = LinkedChrome::new();
+        let mut engine = FocusEngine::new();
+        engine.set(OWNER, key(E, 2, 2), Some(GroupId(2)), By::Restore);
+        engine.set(OWNER, key(E, 1, 0), Some(GroupId(1)), By::Restore);
+        assert_eq!(engine.move_dir(OWNER, &page, &[CHROME_LINK], Dir::Down, &cx), Outcome::Nothing);
+        assert!(page.place(&2002, &cx, At::Drawn).is_none(), "no hidden control");
+        assert_eq!(engine.reconcile(OWNER, &page, &cx), Outcome::Nothing);
+        page.ready = true;
+        assert!(matches!(engine.reconcile(OWNER, &page, &cx), Outcome::Moved { to, .. } if to == key(E, 2, 2)),
+            "the original declared link must land on its real remembered member after restoration");
+        assert_eq!(engine.reconcile(OWNER, &page, &cx), Outcome::Nothing, "one landing only");
+    }
+
     /// The fixture trees of §7.7.
     fn trees() -> Vec<(&'static str, Tree)> {
         let mut out = Vec::new();
