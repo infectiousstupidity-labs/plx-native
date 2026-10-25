@@ -315,8 +315,8 @@ impl PlayerScreen {
         let mut groups = Vec::new();
         Focusable::<H>::groups(self, f.cx, &mut groups);
         for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)) {
-            // The repair alert's buttons are ordinary pressable controls (hover parks focus, the
-            // press dips and commits on release); the transport's are `Direct` — see `draw`.
+            // Repair and centered Play/Pause use the shared hover/press commit. The older
+            // scrubber, secondary row and tabs retain direct delivery — see `draw`.
             let (hover, activate) = if g.id == GROUP_REPAIR || g.id == GROUP_CENTER {
                 (Hover::Focus, Activate::Press)
             } else {
