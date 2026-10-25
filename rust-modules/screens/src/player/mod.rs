@@ -999,8 +999,8 @@ impl PlayerScreen {
                 self.publish();
                 Handled::Yes
             }
-            Key::Left { alt } | Key::Right { alt } => {
-                if self.hud.visible_at_press && self.hud.nav.focus != 0 && !alt {
+            Key::Left { .. } | Key::Right { .. } => {
+                if self.hud.visible_at_press && self.hud.nav.focus != 0 {
                     self.hud.extend(now, input::HUD_LINGER_MS);
                     return if edge == Edge::Up { Handled::Yes } else { Handled::No };
                 }
@@ -1162,8 +1162,7 @@ impl PlayerScreen {
                     self.scrub.ns = plx_media::player::intended_pos_ns(ps);
                 }
             }
-            // Ordinary row arrows were declined to the engine. Scanning keys retain the
-            // existing non-scrubber no-seek behavior without moving a second cursor.
+            // Both ordinary arrows and scanning keys on a row were declined to the engine.
             input::ScrubPress::Row | input::ScrubPress::Tabs => {}
             input::ScrubPress::Jump => {
                 // scrubber focus, FRESH press: the Skip interval hop of the TARGET, and NOTHING

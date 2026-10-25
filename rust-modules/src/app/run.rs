@@ -7839,6 +7839,7 @@ mod lifecycle_regression_tests {
         let mut app = app();
         super::super::bridge::show_page(&mut app.pages, AppArg::Player);
         frame(&mut app, 0);
+        pin_headless_hud(&mut app, 0, None);
         let mut t = 0;
         for (sym, want) in [
             (plx_ui::consts::SDLK_UP, 10),
@@ -7853,9 +7854,8 @@ mod lifecycle_regression_tests {
             (plx_ui::consts::SDLK_UP, 0),
             (plx_ui::consts::SDLK_UP, 11),
         ] {
-            let mut input = plx_ui::fixture::key(plx_machine::machine::Key::Other,
-                plx_machine::machine::Tick { ms: t + 16, dt_us: 16_000 });
-            if let plx_machine::machine::InputKind::Key { sym: code, .. } = &mut input.kind { *code = sym; }
+            let input = super::super::bridge::key_input(sym, 0, 1,
+                plx_machine::machine::Tick { ms: t + 16, dt_us: 16_000 }, plx_machine::machine::Source::Sdl);
             step(&mut app, &mut t, vec![input]);
             let entry = app.pages.nav.top_page().unwrap().id;
             let key = app.pages.input.engine.current(plx_machine::machine::InputOwner::Entry(entry)).unwrap();
@@ -7977,6 +7977,11 @@ mod lifecycle_regression_tests {
         let mut app = app();
         super::super::bridge::show_page(&mut app.pages, AppArg::Player);
         frame(&mut app, 0);
+        let mut playing = plx_data::metadata::PlayingItem::with_subs(Vec::new());
+        playing.chapters.push(plx_data::metadata::Chapter {
+            index: 1, start_ms: 0, title: "Fixture chapter".into(), thumb: String::new(),
+        });
+        app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(playing)));
         super::super::bridge::request_hud_focus(&mut app.pages, plx_screens::player::HudFocusRequest::TabItem(1));
         frame(&mut app, 1);
         super::super::bridge::open_player_overlay(
