@@ -7872,6 +7872,126 @@ mod lifecycle_regression_tests {
         t
     }
 
+    /// A real segment offer seats the stand-in through `raise_for_offer`; when the offer changes
+    /// back to the ordinary discs, the production playback tick must reset the focused row through
+    /// the player-owned Home request rather than leaving the old stand-in item armed.
+    #[test]
+    fn a_production_offer_disappearing_under_focus_resets_hud_home() {
+        let _serial = plx_base::testlock::serial();
+        let Some(mut rig) = Rig::new() else {
+            eprintln!("SKIPPED a_production_offer_disappearing_under_focus_resets_hud_home: no fixture worker thread");
+            return;
+        };
+        let _mode = NextEpisodeGuard::set(plx_media::route::NextEpisodeMode::Countdown);
+        let mut t = playing_inside_final_credits(&mut rig);
+        let focused = super::super::bridge::player(&rig.app.pages).unwrap().hud_focus();
+        assert!(focused.on_secondary(), "the production offer seats its stand-in row: {focused:?}");
+        assert!(focused.secondary_item() == plx_appkit::up_next::PRIMARY_BTN);
+
+        // The same marker is now governed by AfterCredits, so the real sampled slot becomes the
+        // discs. This is the stand-in disappearance edge, not a direct HudNav mutation.
+        plx_media::route::restore_next_episode_mode(plx_media::route::NextEpisodeMode::AfterCredits);
+        step(&mut rig.app, &mut t, vec![]);
+        assert_eq!(
+            super::super::bridge::player(&rig.app.pages).unwrap().hud_focus(),
+            plx_screens::player::HudFocusSelection::HOME,
+            "the vanished stand-in returns focus to the HUD home",
+        );
+    }
+
+    /// HUD expiry is handled by the application's playback tick. A selected tab must not survive
+    /// that reset and become the next destination when a later input reveals the HUD.
+    #[test]
+    fn an_expired_hud_resets_focus_home_through_playback_tick() {
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::set(false);
+        let mut app = app();
+        super::super::bridge::show_page(&mut app.pages, AppArg::Player);
+        frame(&mut app, 0);
+        let player = super::super::bridge::player_mut(&mut app.pages).unwrap();
+        player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(1));
+        player.hud.until = 1;
+        player.publish();
+        assert!(super::super::bridge::player(&app.pages).unwrap().hud_focus().on_tabs());
+
+        let mut t = 0;
+        step(&mut app, &mut t, vec![]);
+        assert_eq!(
+            super::super::bridge::player(&app.pages).unwrap().hud_focus(),
+            plx_screens::player::HudFocusSelection::HOME,
+            "auto-hide resets the selection through the production tick",
+        );
+    }
+
+    /// Returning from an Info overlay sends the production `FocusTabs` request. The selected tab
+    /// is read through the seam and sent back unchanged, rather than being reset to Info.
+    #[test]
+    fn an_info_overlay_return_preserves_the_selected_tab_through_player_requests() {
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::set(false);
+        let mut app = app();
+        super::super::bridge::show_page(&mut app.pages, AppArg::Player);
+        frame(&mut app, 0);
+        {
+            let player = super::super::bridge::player_mut(&mut app.pages).unwrap();
+            player.request_hud_focus(plx_screens::player::HudFocusRequest::TabItem(1));
+            player.publish();
+        }
+        super::super::bridge::open_player_overlay(
+            &app.player.session,
+            app.bridge.metadata_view(),
+            &mut app.pages,
+            plx_screens::player::overlay::OverlayKind::Info,
+        );
+        for now in (16..=128).step_by(16) {
+            frame(&mut app, now);
+        }
+        assert_eq!(
+            super::super::bridge::player_overlay_kind(&app.pages),
+            Some(plx_screens::player::overlay::OverlayKind::Info),
+        );
+
+        let mut t = 128;
+        let down = plx_ui::fixture::key(
+            plx_machine::machine::Key::Down,
+            plx_machine::machine::Tick { ms: t + 16, dt_us: 16_000 },
+        );
+        step(&mut app, &mut t, vec![down]);
+        step(&mut app, &mut t, vec![]); // deliver the queued FocusTabs request on the closing edge
+        let focus = super::super::bridge::player(&app.pages).unwrap().hud_focus();
+        assert!(focus.on_tabs(), "FocusTabs returns to the tabs row: {focus:?}");
+        assert_eq!(focus.tab_item(), 1, "FocusTabs preserves the selected Chapters tab");
+    }
+
+    /// A countdown is armed by the real Up Next offer. Moving down from its primary to the tabs
+    /// row cancels it on the following playback tick, exercising the production steady-state rule.
+    #[test]
+    fn leaving_the_up_next_primary_cancels_the_armed_countdown() {
+        let _serial = plx_base::testlock::serial();
+        let Some(mut rig) = Rig::new() else {
+            eprintln!("SKIPPED leaving_the_up_next_primary_cancels_the_armed_countdown: no fixture worker thread");
+            return;
+        };
+        let _mode = NextEpisodeGuard::set(plx_media::route::NextEpisodeMode::Countdown);
+        let mut t = playing_inside_final_credits(&mut rig);
+        let player = super::super::bridge::player(&rig.app.pages).unwrap();
+        assert!(player.up_next.armed(), "the production offer arms Up Next");
+        assert!(player.hud_focus().on_secondary());
+        assert_eq!(player.hud_focus().secondary_item(), plx_appkit::up_next::PRIMARY_BTN);
+
+        let down = plx_ui::fixture::key(
+            plx_machine::machine::Key::Down,
+            plx_machine::machine::Tick { ms: t + 16, dt_us: 16_000 },
+        );
+        step(&mut rig.app, &mut t, vec![down]);
+        assert!(super::super::bridge::player(&rig.app.pages).unwrap().hud_focus().on_scrubber());
+        assert!(super::super::bridge::player(&rig.app.pages).unwrap().up_next.armed(),
+            "the request is observed by playback_tick on the next frame");
+        step(&mut rig.app, &mut t, vec![]);
+        assert!(!super::super::bridge::player(&rig.app.pages).unwrap().up_next.armed(),
+            "leaving the primary cancels the countdown");
+    }
+
     /// **Next episode: After credits.** The credits of an episode with a successor queued arm no
     /// Up Next countdown, so nothing is requested however long they run; the end of the stream
     /// then plays the successor exactly as it always has.

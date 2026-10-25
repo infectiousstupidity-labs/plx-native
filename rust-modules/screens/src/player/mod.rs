@@ -1912,12 +1912,11 @@ mod step_ladder_tests {
         assert_eq!(page.hud_focus(), HudFocusSelection::HOME);
     }
 
-    /// One BOUND key press as the app delivers it: `note_global_press` samples the fresh-press
-    /// state (`HudState::note_fresh_press`) and only then does the page's `key` arm run. [`fresh`]
-    /// skips that sample, which is right for a test of one arm's body and wrong for anything about
-    /// what the PREVIOUS press left behind — the two-press BACK reads exactly that.
+    /// One BOUND key press as the app delivers it. `PlayerScreen::step` samples the fresh-press
+    /// state (`HudState::note_fresh_press`) at delivery before the page's `key` arm runs. Keeping
+    /// this helper on that route matters for two-press BACK cases: manually sampling here would
+    /// prepare the same press twice and consume the previous press's one-shot state.
     fn bound_press(page: &mut PlayerScreen, sym: u32, wcode: u32) -> (Handled, Vec<PlayerReq>) {
-        page.hud.note_fresh_press(TestHost::session(&cx()), 1_000, false);
         press(page, sym, wcode, Edge::Down)
     }
 
