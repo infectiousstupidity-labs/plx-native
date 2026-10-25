@@ -7828,6 +7828,47 @@ mod lifecycle_regression_tests {
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
     }
 
+    /// Bare-HUD travel must update the same engine identity the renderer and OK read.
+    #[test]
+    fn player_hud_dispatcher_travel_owns_the_highlight() {
+        let _serial = plx_base::testlock::serial();
+        let _paused = TransportPaused::set(true);
+        let mut app = app();
+        super::super::bridge::show_page(&mut app.pages, AppArg::Player);
+        frame(&mut app, 0);
+        let mut t = 0;
+        for (sym, want) in [
+            (plx_ui::consts::SDLK_UP, 10),
+            (plx_ui::consts::SDLK_RIGHT, 11),
+            (plx_ui::consts::SDLK_RIGHT, 12),
+            (plx_ui::consts::SDLK_RIGHT, 12),
+            (plx_ui::consts::SDLK_LEFT, 11),
+            (plx_ui::consts::SDLK_DOWN, 0),
+            (plx_ui::consts::SDLK_DOWN, 20),
+            (plx_ui::consts::SDLK_DOWN, 20),
+            (plx_ui::consts::SDLK_LEFT, 20),
+            (plx_ui::consts::SDLK_UP, 0),
+            (plx_ui::consts::SDLK_UP, 11),
+        ] {
+            let mut input = plx_ui::fixture::key(plx_machine::machine::Key::Other,
+                plx_machine::machine::Tick { ms: t + 16, dt_us: 16_000 });
+            if let plx_machine::machine::InputKind::Key { sym: code, .. } = &mut input.kind { *code = sym; }
+            step(&mut app, &mut t, vec![input]);
+            let entry = app.pages.nav.top_page().unwrap().id;
+            let key = app.pages.input.engine.current(plx_machine::machine::InputOwner::Entry(entry)).unwrap();
+            assert_eq!(key.elem, want, "engine travel at key {sym}");
+            let selection = super::super::bridge::player(&app.pages).unwrap().hud_focus();
+            let projected = match selection.focus_index() {
+                1 => 10 + selection.secondary_item() as u32,
+                2 => 20 + selection.tab_item() as u32,
+                _ => 0,
+            };
+            assert_eq!(projected, key.elem, "paint/probe and engine agree");
+            assert_eq!(plx_media::player::TX.scrub_ns.load(std::sync::atomic::Ordering::Relaxed), -1,
+                "row navigation never seeks");
+        }
+    }
+
     /// Puts the Next episode preference back whatever the test did.
     struct NextEpisodeGuard(plx_media::route::NextEpisodeMode);
     impl NextEpisodeGuard {
