@@ -4,10 +4,10 @@
 //! same height — and the discs return the moment the segment ends.
 //!
 //! Replacing them rather than joining them is the design call: one wide unmissable target in the
-//! spot the eye already goes for transport controls. The cost is that CC/Audio are unreachable for
-//! the length of the segment, and that the button only exists while the HUD is up — which is why
-//! `app.rs` RAISES the HUD once when a segment begins and parks focus here, so a bare OK still
-//! skips in one press instead of three.
+//! spot the eye already goes for transport controls. CC/Audio are displaced while the full HUD
+//! shows a marked segment. Skip Intro can also draw the same pill alone while the HUD is hidden,
+//! without its timer or focus changing: a bare OK and a pointer click both take that offer.
+//! Skip Credits still raises the full HUD; Up Next keeps its separate countdown behavior.
 #![allow(dead_code)]
 use plx_data::metadata::{self, MarkerKind};
 use plx_ui::theme;
