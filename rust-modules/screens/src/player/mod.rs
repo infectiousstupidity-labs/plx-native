@@ -2030,6 +2030,14 @@ mod step_ladder_tests {
         page.set_hud_policy(HudPolicy::Hidden);
         assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
             "a covering modal/capsule must withhold the standalone prompt");
+        page.set_hud_policy(HudPolicy::Normal);
+        page.busy = player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed");
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "a failed playback cannot expose a live-looking skip");
+        page.busy = player_hud::Busy::None;
+        page.transport = false;
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "an Info/Chapters surface owns its area");
         plx_media::player::restore_state_for_test(old_state as u8);
     }
 
