@@ -31,7 +31,7 @@ pub enum SkipAction {
 /// asking "is the playhead in a credits segment?" by string-comparing user-facing copy made a pure
 /// copy-edit — the sort of thing a design pass does — silently disable Up Next and auto-advance,
 /// with no compile error and nothing to fail.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prompt {
     /// the segment itself — carried so activating the button can retire it (`metadata::mark_skipped`)
     pub marker: metadata::Marker,
