@@ -787,7 +787,7 @@ impl Controls {
 /// the alternative — re-deriving the three-way choice at each of the draw, the OK handler, the
 /// pointer handler, the LEFT/RIGHT pin and `icon_hit` — encodes its precedence in the order of five
 /// separate if-chains, with nothing to keep them agreeing and nothing to test.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlSlot {
     /// the ordinary Subtitles, Audio and More discs
     Discs(Controls),
