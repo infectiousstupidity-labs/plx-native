@@ -1981,6 +1981,82 @@ mod step_ladder_tests {
         }
     }
 
+    /// #13: when an intro arrives over a hidden HUD, the sole pointer stop is
+    /// the existing Skip pill. Neither the scrubber nor the tabs may leak
+    /// through, and clicking it must not arm the full HUD's linger timer.
+    #[test]
+    fn standalone_intro_only_registers_its_button_and_click_does_not_reveal_hud() {
+        use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        use plx_machine::machine::FocusKey;
+        use plx_ui::hit::{HitMap, PointerKind};
+        use plx_ui::screen::{At, DrawFrame};
+        let _g = plx_base::testlock::serial();
+        let ps = TestHost::session(&cx());
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(Marker {
+            kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false,
+        }));
+        page.hud.dismissed = true;
+        page.hud.until = 0;
+        let ctx = cx();
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_some());
+        let mut draw = DrawFrame::new(&ctx, plx_ui::Painter::root());
+        page.record_stops(&mut draw, false);
+        let stops = draw.into_stops();
+        assert_eq!(stops.iter().map(|s| s.key.elem).collect::<Vec<_>>(), vec![ELEM_ROW_BASE]);
+        let mut map = HitMap::new();
+        map.fill(stops);
+        map.swap();
+        let pill = Focusable::<TestHost>::place(&page, &ELEM_ROW_BASE, &ctx, At::Drawn).unwrap();
+        let hit = map.resolve(Some(ENTRY), PointerKind::Click, pill.rect.cx(), pill.rect.cy(), None);
+        assert_eq!(hit.activate.map(|(k, _)| k), Some(FocusKey { entry: ENTRY, elem: ELEM_ROW_BASE }));
+
+        let (handled, reqs) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(handled, Handled::Yes);
+        assert_eq!(reqs, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.hud.until, 0, "a Skip click must not extend the transport timer");
+        assert!(page.hud.dismissed, "the full HUD stays down during the deferred press");
+
+        page.hud.dismissed = false;
+        page.hud.until = 10_000;
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "when the viewer opened the HUD the pill belongs to the normal control row");
+        page.hud.dismissed = true;
+        page.set_hud_policy(HudPolicy::Hidden);
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "a covering modal/capsule must withhold the standalone prompt");
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    /// A bound OK un-dismisses HUD state before the screen sees it. The saved
+    /// pre-press visibility must win so a hidden Skip Intro neither toggles
+    /// pause nor reveals transport chrome, even inside an unexpired linger.
+    #[test]
+    fn hidden_intro_ok_arms_one_skip_without_waking_the_hud() {
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let ps = TestHost::session(&cx());
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = player_hud::ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(Marker {
+            kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false,
+        }));
+        page.hud.until = 10_000; // intentionally hand-hidden before the linger expires
+        page.hud.dismissed = true;
+        let (handled, requests) = bound_press(&mut page, SDLK_RETURN, 0);
+        assert_eq!(handled, Handled::Yes);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert!(page.hud.dismissed, "the press must restore the hand-hide");
+        assert_eq!(page.hud.until, 10_000, "a standalone action must not reset HUD timeout");
+        assert_eq!(page.hud.nav.btn, 0);
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
     /// **The failure notice expiring owes a frame.** Nothing else on the screen changes when the
     /// 6 s notice lapses (the cues are libass's, whose own fingerprint is unchanged), so
     /// `clock_fingerprint` must move on `sidecar::notice_shown()` alone — before it did, the
