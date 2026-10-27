@@ -1992,7 +1992,8 @@ mod step_ladder_tests {
         use plx_ui::hit::{HitMap, PointerKind};
         use plx_ui::screen::{At, DrawFrame};
         let _g = plx_base::testlock::serial();
-        let ps = TestHost::session(&cx());
+        let context = cx();
+        let ps = TestHost::session(&context);
         let old_state = plx_media::player::state(ps);
         plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
 
@@ -2039,7 +2040,8 @@ mod step_ladder_tests {
     fn hidden_intro_ok_arms_one_skip_without_waking_the_hud() {
         use plx_data::metadata::{Marker, MarkerKind};
         let _g = plx_base::testlock::serial();
-        let ps = TestHost::session(&cx());
+        let context = cx();
+        let ps = TestHost::session(&context);
         let old_state = plx_media::player::state(ps);
         plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
         let mut page = PlayerScreen::new(ENTRY);
