@@ -812,6 +812,11 @@ impl PlayerScreen {
                 self.publish();
                 return Handled::Yes;
             }
+            // The hit map belongs to the last painted frame. If the marker
+            // retired since then, do not reinterpret its old pill as a disc.
+            if !self.hud_up(ps, now) {
+                return Handled::Yes;
+            }
         }
         let failed = plx_appkit::player_hud::transport_hidden(ps);
         let Some(elem) = hit else {
@@ -2091,7 +2096,8 @@ mod step_ladder_tests {
         use plx_appkit::player_hud::{ControlSlot, Controls, ELEM_ROW_BASE};
         use plx_data::metadata::{Marker, MarkerKind};
         let _g = plx_base::testlock::serial();
-        let ps = TestHost::session(&cx());
+        let context = cx();
+        let ps = TestHost::session(&context);
         let old_state = plx_media::player::state(ps);
         plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
         let original = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
@@ -2106,6 +2112,16 @@ mod step_ladder_tests {
             previous: true, next: false, restart: false
         })), None, "never turn Skip into Previous");
         assert_eq!(page.take_row_press(page.slot), None, "the old press was consumed");
+
+        // A click resolved on the previous frame's floating-pill stop must
+        // not arm the newly revealed Previous disc after the intro expires.
+        page.slot = ControlSlot::Discs(Controls {
+            previous: true, next: false, restart: false,
+        });
+        page.hud.dismissed = true;
+        let (_, reqs) = click(&mut page, ELEM_ROW_BASE);
+        assert!(reqs.is_empty(), "a retired pill's stale hit must do nothing");
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
 
         page.hud.dismissed = true;
         let (_, _) = click(&mut page, ELEM_ROW_BASE);
@@ -2132,7 +2148,8 @@ mod step_ladder_tests {
         use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
         use plx_data::metadata::{Marker, MarkerKind};
         let _g = plx_base::testlock::serial();
-        let ps = TestHost::session(&cx());
+        let context = cx();
+        let ps = TestHost::session(&context);
         let old_state = plx_media::player::state(ps);
         let was_paused = plx_media::player::TX.paused.swap(false, std::sync::atomic::Ordering::Relaxed);
         plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
