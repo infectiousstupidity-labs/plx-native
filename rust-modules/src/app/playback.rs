@@ -452,7 +452,6 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
         player.transport_reset(false);
         player.hud = HudState::IDLE;
         player.scrub = Scrub::IDLE;
-        player.up_next.reset();
         player.hud.extend(clock::now(), hud_ms);
         player.publish();
     }
