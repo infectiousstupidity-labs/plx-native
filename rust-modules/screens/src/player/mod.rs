@@ -63,7 +63,7 @@ pub const WORD: &str = "player";
 pub const SHAPE: &str =
     "PlayerScreen{hud:{focus:i32,btn:i32,tab:i32,until:u32,dismissed:bool,visible_at_press:bool,\
      exit_armed:bool,back_leaves_at_press:bool,offer:Option<(u32,i64)>,was_standin:bool},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
-     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,pending_row:Option<(u32,Marker)>,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
+     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,pending_row:Option<RowPress>,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
 
 /// **The page this playback was launched from**, as the container's own identity.
 ///
@@ -111,7 +111,7 @@ pub enum HudPolicy {
 /// evidence of what the user pressed; standalone actions retain their marker until commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowPress {
-    Hud,
+    Hud { slot: ControlSlot, btn: i32 },
     StandaloneIntro(plx_data::metadata::Marker),
 }
 
@@ -127,6 +127,8 @@ pub struct PlayerScreen {
     transport_tap: bool,
     /// Armed at press-down, consumed exactly once on deferred commit.
     pending_row_press: Option<RowPress>,
+    /// Identity of the row registered in the last painted pointer hit map.
+    presented_row: Option<(ControlSlot, bool)>,
     // (`held: HeldKey` stood here — "the client-side hold-repeat for the bare transport's
     // directions". Nothing armed it after phase 9 put the panels' input on the dispatcher, so it
     // wrote two constant zeros into this screen's canonical state; the type is deleted with the
@@ -180,6 +182,7 @@ impl PlayerScreen {
             seek_burst: player_hud::seek_jump::SeekBurst::IDLE,
             transport_tap: false,
             pending_row_press: None,
+            presented_row: None,
             row: TransportRow::new(),
             up_next: Countdown::default(),
             slot: ControlSlot::Discs(player_hud::Controls::NONE),
@@ -235,6 +238,7 @@ impl PlayerScreen {
     pub fn transport_reset(&mut self, for_reload: bool) {
         self.transport_tap = false;
         self.pending_row_press = None;
+        self.presented_row = None;
         self.scrub.cancel();
         self.row.reset_title();
         if !for_reload {
@@ -491,13 +495,15 @@ impl PlayerScreen {
     /// reset cannot silently become Previous, Subtitles or another Skip action.
     pub fn take_row_press(&mut self, slot: ControlSlot) -> Option<RowPress> {
         match self.pending_row_press.take()? {
-            RowPress::Hud => Some(RowPress::Hud),
+            RowPress::Hud { slot: pressed, btn } if pressed == slot && slot.enabled(btn) => {
+                Some(RowPress::Hud { slot: pressed, btn })
+            }
             RowPress::StandaloneIntro(marker)
-                if matches!(slot, ControlSlot::Skip(pr) if pr.marker == marker) =>
+                if matches!(slot, ControlSlot::Skip(pr) if pr.kind == plx_data::metadata::MarkerKind::Intro && pr.marker == marker) =>
             {
                 Some(RowPress::StandaloneIntro(marker))
             }
-            RowPress::StandaloneIntro(_) => None,
+            _ => None,
         }
     }
 
@@ -527,13 +533,16 @@ impl PlayerScreen {
     /// Does the caption block lift clear of the transport this frame? While the transport is up,
     /// or while a panel is being read over it.
     fn subs_lift(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
+        // The floating pill shares the transport's subtitle clearance band.
+        // Lift text, ASS and bitmap subtitles without drawing transport chrome.
         self.hud_up(ps, now) || self.hud_policy == HudPolicy::Lifted
+            || self.standalone_intro(ps, now).is_some()
     }
 
-    /// Is the transport actually DRAWN this frame? Whenever the captions lift for it, unless the
-    /// repair alert has the screen.
+    /// Caption clearance and transport-chrome visibility are separate decisions.
     fn hud_drawn(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
-        self.subs_lift(ps, now) && !self.repair_alert.visible()
+        (self.hud_up(ps, now) || self.hud_policy == HudPolicy::Lifted)
+            && !self.repair_alert.visible()
     }
 }
 
@@ -803,18 +812,24 @@ impl PlayerScreen {
         fx: &mut Effects<'_, H>,
     ) -> Handled {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_SCRUB, ELEM_TAB_BASE};
+        // A new click abandons any previous pending control press.
+        self.pending_row_press = None;
+        if hit.is_some_and(|e| player_hud::row_index(e).is_some()) {
+            let floating = self.standalone_intro(ps, now).is_some();
+            // Hits belong to the LAST painted frame. A marker may expire, or
+            // pointer motion reveal the HUD, before this event is dispatched.
+            if self.presented_row != Some((self.slot, floating))
+                || (!floating && !self.group_drawn(GROUP_ROW, self.hud_drawn(ps, now)))
+            {
+                return Handled::Yes;
+            }
+        }
         if hit == Some(player_hud::ELEM_ROW_BASE) {
             if let Some(prompt) = self.standalone_intro(ps, now) {
-                // Keep the marker's identity through the deferred spring-back.
                 self.hud.nav.btn = 0;
                 self.hud.hide(false);
                 self.arm_control_row(fx, RowPress::StandaloneIntro(prompt.marker));
                 self.publish();
-                return Handled::Yes;
-            }
-            // The hit map belongs to the last painted frame. If the marker
-            // retired since then, do not reinterpret its old pill as a disc.
-            if !self.hud_up(ps, now) {
                 return Handled::Yes;
             }
         }
@@ -864,7 +879,7 @@ impl PlayerScreen {
                 self.hud.nav.focus = 1;
                 if !self.slot.enabled(btn) { return Handled::Yes; }
                 self.hud.nav.btn = btn;
-                self.arm_control_row(fx, RowPress::Hud);
+                self.arm_control_row(fx, RowPress::Hud { slot: self.slot, btn });
                 Handled::Yes
             }
             e if (ELEM_TAB_BASE..ELEM_FAILURE_BASE).contains(&e) => {
@@ -940,6 +955,11 @@ impl PlayerScreen {
         meta: plx_data::metadata::MetadataView<'_>,
     ) -> Handled {
         use consts::Key;
+        // The app cancels an armed press on a different bound key. Retire the
+        // screen's deferred target too; a cancelled pill is no longer armed.
+        if edge == Edge::Down && !matches!(key, Key::Ok) {
+            self.pending_row_press = None;
+        }
         if edge == Edge::Down && !matches!(key, Key::Left { .. } | Key::Right { .. }) {
             self.seek_burst.reset();
             self.drop_transport_tap();
@@ -1100,7 +1120,7 @@ impl PlayerScreen {
         if self.take_target(now, fx) {
             // OK confirmed the target and the film plays on from it; that is all this press means
         } else if vis && self.hud.nav.focus == 1 {
-            self.arm_control_row(fx, RowPress::Hud);
+            self.arm_control_row(fx, RowPress::Hud { slot: self.slot, btn: self.hud.nav.btn });
         } else if vis && self.hud.nav.focus == 2 {
             let kind = if self.hud.nav.tab == 0 {
                 Some(overlay::OverlayKind::Info)
@@ -1562,7 +1582,24 @@ impl LogicalState for PlayerScreen {
         c.bool(self.transport_tap);
         c.option(self.pending_row_press.as_ref(), |c, pressed| {
             match pressed {
-                RowPress::Hud => { c.u32(0); }
+                RowPress::Hud { slot, btn } => {
+                    c.u32(0).u32(*btn as u32);
+                    match slot {
+                        ControlSlot::Discs(controls) => {
+                            c.u32(0).bool(controls.previous).bool(controls.next).bool(controls.restart);
+                        }
+                        ControlSlot::Skip(pr) => {
+                            c.u32(1).u32(pr.marker.kind as u32)
+                                .u64(pr.marker.start_ms as u64).u64(pr.marker.end_ms as u64)
+                                .bool(pr.marker.final_seg);
+                        }
+                        ControlSlot::UpNext(m) => {
+                            c.u32(2).u32(m.kind as u32)
+                                .u64(m.start_ms as u64).u64(m.end_ms as u64)
+                                .bool(m.final_seg);
+                        }
+                    }
+                }
                 RowPress::StandaloneIntro(m) => {
                     c.u32(1).u32(m.kind as u32)
                         .u64(m.start_ms as u64).u64(m.end_ms as u64)
@@ -1657,6 +1694,15 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         if self.repair_alert.visible() {
             self.repair_alert.draw_scrim();
             self.repair_alert.draw(plx_platform::i18n::msg::settings_cancel_c(), plx_platform::i18n::msg::widgets_repair_action_c(), f.measure);
+        }
+        if f.records_stops() {
+            // Keep the control identity that the published hit map refers to.
+            let floating = self.standalone_intro(ps, now).is_some();
+            self.presented_row = if floating || self.group_drawn(GROUP_ROW, hud_drawn) {
+                Some((self.slot, floating))
+            } else {
+                None
+            };
         }
         self.record_stops(f, hud_drawn);
     }
