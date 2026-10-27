@@ -1172,6 +1172,12 @@ fn apply_info_action(
 /// activation acts on the row that is DRAWN — the slot is resolved once per loop iteration for input,
 /// update and draw alike (see the `let ctrl` at the top of the loop), and an offer that arrived
 /// mid-press has already changed what the user is looking at.
+/// A deferred standalone Skip Intro press must never turn into another
+/// control when its marker expires before the press spring commits.
+fn row_activation_allowed(transport_dismissed: bool, ctrl: plx_appkit::player_hud::ControlSlot) -> bool {
+    !transport_dismissed || ctrl.is_intro_skip()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn activate_player_row(
     player: &mut plx_media::player::machine::Player,
@@ -1186,6 +1192,12 @@ pub(crate) unsafe fn activate_player_row(
     // The cursor is the instance's; read the one field this dispatch turns on, so the container
     // is borrowed once and the arms below are free to present a panel on it.
     let btn = super::bridge::player(pages).map_or(0, |player| player.hud.nav.btn);
+    // Hidden transport means the user activated the floating Skip Intro.
+    // A stale press must never operate the newly visible row occupant.
+    let transport_dismissed = super::bridge::player(pages).is_some_and(|page| page.hud.dismissed);
+    if !row_activation_allowed(transport_dismissed, ctrl) {
+        return;
+    }
     if let plx_appkit::player_hud::ControlSlot::Discs(controls) = ctrl {
         // The discs are what row 1 holds — the complement of the stand-in arm below, and the
         // row's only other occupant. OK on a control disc PRESENTS its panel on this page's own
@@ -1220,8 +1232,40 @@ pub(crate) unsafe fn activate_player_row(
         );
     }
     if let Some(player) = super::bridge::player_mut(pages) {
-        player.hud.extend(now, HUD_LINGER_MS);
+        // Standalone intro activation never opens the full HUD, even after
+        // the marker has already been retired by activate_ctrl_row.
+        if !transport_dismissed {
+            player.hud.extend(now, HUD_LINGER_MS);
+        }
         player.publish();
+    }
+}
+
+#[cfg(test)]
+mod standalone_intro_commit_tests {
+    use super::*;
+    use plx_data::metadata::{Marker, MarkerKind};
+    use plx_media::route::NextEpisodeMode;
+
+    #[test]
+    fn hidden_prompt_cannot_commit_an_expired_marker_as_another_row_action() {
+        let marker = |kind| Marker {
+            kind, start_ms: 1_000, end_ms: 5_000, final_seg: true,
+        };
+        let intro = plx_appkit::player_hud::slot_for(
+            Some(marker(MarkerKind::Intro)), false, NextEpisodeMode::Countdown,
+        );
+        let credits = plx_appkit::player_hud::slot_for(
+            Some(marker(MarkerKind::Credits)), false, NextEpisodeMode::Countdown,
+        );
+        let discs = plx_appkit::player_hud::ControlSlot::Discs(
+            plx_appkit::player_hud::Controls::NONE,
+        );
+        assert!(row_activation_allowed(true, intro));
+        assert!(!row_activation_allowed(true, credits));
+        assert!(!row_activation_allowed(true, discs));
+        assert!(row_activation_allowed(false, credits));
+        assert!(row_activation_allowed(false, discs));
     }
 }
 
