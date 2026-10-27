@@ -496,7 +496,9 @@ impl PlayerScreen {
     /// reset cannot silently become Previous, Subtitles or another Skip action.
     pub fn take_row_press(&mut self, slot: ControlSlot) -> Option<RowPress> {
         match self.pending_row_press.take()? {
-            RowPress::Hud { slot: pressed, btn } if pressed == slot && slot.enabled(btn) => {
+            RowPress::Hud { slot: pressed, btn }
+                if Self::same_hud_action(pressed, slot, btn) =>
+            {
                 Some(RowPress::Hud { slot: pressed, btn })
             }
             RowPress::StandaloneIntro(marker)
@@ -505,6 +507,19 @@ impl PlayerScreen {
                 Some(RowPress::StandaloneIntro(marker))
             }
             _ => None,
+        }
+    }
+
+    /// Validate the selected ACTION, rather than incidental flags of the whole
+    /// controls row. E.g. Subtitles remains Subtitles when Next becomes available.
+    /// Previous is special: its restart/previous-episode meaning must not change.
+    fn same_hud_action(pressed: ControlSlot, current: ControlSlot, btn: i32) -> bool {
+        match (pressed, current) {
+            (ControlSlot::Discs(old), ControlSlot::Discs(new)) => {
+                old.enabled(btn) && new.enabled(btn)
+                    && (btn != player_hud::BTN_PREVIOUS || old.restart == new.restart)
+            }
+            _ => pressed == current && current.enabled(btn),
         }
     }
 
@@ -2233,6 +2248,19 @@ mod step_ladder_tests {
         page.hud.dismissed = true;
         assert_eq!(page.take_row_press(discs), Some(original_press),
             "normal row presses preserve their press-time button and ignore later dismissal/focus");
+        page.pending_row_press = Some(original_press);
+        let changed_discs = ControlSlot::Discs(Controls {
+            previous: true, next: true, restart: true,
+        });
+        assert_eq!(page.take_row_press(changed_discs), Some(original_press),
+            "a change in episode navigation must not swallow an Audio press");
+        let before_previous = ControlSlot::Discs(Controls {
+            previous: true, next: true, restart: false,
+        });
+        let previous_press = RowPress::Hud { slot: before_previous, btn: player_hud::BTN_PREVIOUS };
+        page.pending_row_press = Some(previous_press);
+        assert_eq!(page.take_row_press(changed_discs), None,
+            "Previous becoming Restart mid-press must not change the requested action");
         let intro_slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
         page.pending_row_press = Some(RowPress::Hud { slot: intro_slot, btn: 0 });
         assert_eq!(page.take_row_press(ControlSlot::Discs(Controls {
