@@ -289,7 +289,11 @@ impl PlayerScreen {
         if !f.records_stops() { return; }
         let mut groups = Vec::new();
         Focusable::<H>::groups(self, f.cx, &mut groups);
-        for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)) {
+        // An intro can register its one existing row stop even when the rest of the
+        // transport has no stops. Draw and hit eligibility use the same policy.
+        let standalone = self.standalone_intro(H::session(f.cx), f.cx.tick.ms).is_some();
+        for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)
+            || (standalone && g.id == GROUP_ROW)) {
             // The repair alert's buttons are ordinary pressable controls (hover parks focus, the
             // press dips and commits on release); the transport's are `Direct` — see `draw`.
             let (hover, activate) = if g.id == GROUP_REPAIR {
@@ -468,6 +472,29 @@ impl PlayerScreen {
         self.scrub.cancel();
         self.hud.raise_for_offer(now, primary);
         self.publish();
+    }
+
+    /// Eligibility for the standalone Skip Intro control, independently of HUD visibility.
+    /// Normal user-opened HUDs still render the same Skip pill in their control row.
+    fn intro_can_float(&self) -> Option<plx_appkit::skip_pill::Prompt> {
+        if self.hud_policy != HudPolicy::Normal || !self.transport
+            || self.repair_alert.visible() || player_hud::readout_owns_frame(self.busy)
+            || !self.row.chrome_interactive() || self.scrub.is_live()
+        {
+            return None;
+        }
+        match self.slot {
+            ControlSlot::Skip(pr) if self.slot.is_intro_skip() => Some(pr),
+            _ => None,
+        }
+    }
+
+    fn standalone_intro(
+        &self,
+        ps: &plx_media::route::PlaybackSession,
+        now: u32,
+    ) -> Option<plx_appkit::skip_pill::Prompt> {
+        if self.hud_up(ps, now) { None } else { self.intro_can_float() }
     }
 
     /// Does the caption block lift clear of the transport this frame? While the transport is up,
@@ -659,6 +686,12 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                     // never saw a pointer event at all.
                     InputKind::Pointer { .. } => {
                         self.end_jump_gesture();
+                        // Moving toward a standalone Skip button must not open the HUD
+                        // before the pointer can click it. Explicit clicks elsewhere
+                        // still use the normal picture/playback interaction.
+                        if self.standalone_intro(ps, input.at.ms).is_some() {
+                            return Handled::Yes;
+                        }
                         self.hud.dismissed = false;
                         self.hud.extend(input.at.ms, input::HUD_LINGER_MS);
                         self.publish();
@@ -741,6 +774,15 @@ impl PlayerScreen {
         fx: &mut Effects<'_, H>,
     ) -> Handled {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_SCRUB, ELEM_TAB_BASE};
+        if hit == Some(player_hud::ELEM_ROW_BASE) && self.standalone_intro(ps, now).is_some() {
+            // Use the existing deferred row press and marker-retirement path,
+            // but do not raise transport chrome just to operate the prompt.
+            self.hud.nav.btn = 0;
+            self.hud.hide(false);
+            self.arm_control_row(fx);
+            self.publish();
+            return Handled::Yes;
+        }
         let failed = plx_appkit::player_hud::transport_hidden(ps);
         let Some(elem) = hit else {
             // **A click that lands on no control at all toggles play/pause** — the `else` arm of
@@ -1009,6 +1051,16 @@ impl PlayerScreen {
     /// arm — a plain play/pause toggle. Port of `key_ok`'s `Route::Player` arm.
     fn key_ok<H: AppLike>(&mut self, now: u32, fx: &mut Effects<'_, H>) {
         let vis = self.hud.visible_at_press;
+        if !vis && self.intro_can_float().is_some() {
+            // The fresh-press snapshot predates note_global_press clearing a hand
+            // dismissal. Keep that dismissal so this hidden-prompt OK does not
+            // reveal transport chrome, even during an unexpired HUD linger.
+            self.hud.nav.btn = 0;
+            self.hud.hide(false);
+            self.arm_control_row(fx);
+            self.publish();
+            return;
+        }
         if self.take_target(now, fx) {
             // OK confirmed the target and the film plays on from it; that is all this press means
         } else if vis && self.hud.nav.focus == 1 {
@@ -1541,6 +1593,13 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
             self.draw_hud(ps, now, f.measure, H::metadata(f.cx));
         } else {
             self.row.reset_title();
+            if let Some(prompt) = self.standalone_intro(ps, now) {
+                // The same measured pill, on the same control-row rect, without
+                // the playbar, backdrop ramp, title, or bottom tabs.
+                plx_appkit::skip_pill::draw(
+                    &mut self.row, plx_ui::Painter::root(), prompt, false, f.measure,
+                );
+            }
         }
         // The read-out is NOT transport chrome — it is drawn whether or not the HUD is up, so a
         // terminal `Error` (which is not `is_busy()`, so it does not pin the HUD) keeps its message
