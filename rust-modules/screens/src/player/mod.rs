@@ -2272,6 +2272,46 @@ mod step_ladder_tests {
         plx_media::player::restore_state_for_test(old_state as u8);
     }
 
+    /// Sweep every old/new episode-navigation flag combination and every button,
+    /// including out-of-range indices. The selected semantic action is stable even
+    /// when irrelevant flags change, but Previous must not silently become Restart.
+    #[test]
+    fn deferred_disc_action_matrix_is_safe_and_does_not_drop_unrelated_actions() {
+        use plx_appkit::player_hud::{ControlSlot, Controls};
+        let _g = plx_base::testlock::serial();
+        let flags = |bits: u8| Controls {
+            previous: bits & 1 != 0,
+            next: bits & 2 != 0,
+            restart: bits & 4 != 0,
+        };
+        let mut page = PlayerScreen::new(ENTRY);
+        for old_bits in 0..8 {
+            for new_bits in 0..8 {
+                let old = flags(old_bits);
+                let new = flags(new_bits);
+                for btn in -1..=player_hud::BTN_N {
+                    let pressed = RowPress::Hud { slot: ControlSlot::Discs(old), btn };
+                    page.pending_row_press = Some(pressed);
+                    let expected = match btn {
+                        player_hud::BTN_PREVIOUS => {
+                            old.previous && new.previous && old.restart == new.restart
+                        }
+                        player_hud::BTN_NEXT => old.next && new.next,
+                        player_hud::BTN_SUBTITLES | player_hud::BTN_AUDIO | player_hud::BTN_MORE => true,
+                        _ => false,
+                    };
+                    assert_eq!(
+                        page.take_row_press(ControlSlot::Discs(new)).is_some(),
+                        expected,
+                        "old={old_bits:03b}, new={new_bits:03b}, button={btn}",
+                    );
+                    assert_eq!(page.take_row_press(ControlSlot::Discs(new)), None,
+                        "no action may be committed twice");
+                }
+            }
+        }
+    }
+
     /// Pointer hits are stamped by the LAST render. Even when motion has revealed
     /// the full HUD, a floating-pill hit from the preceding frame is not a disc.
     #[test]
