@@ -827,6 +827,11 @@ impl ControlSlot {
     pub fn is_discs(self) -> bool {
         matches!(self, ControlSlot::Discs(_))
     }
+    /// Skip Intro alone may float over the picture without revealing the full HUD.
+    /// Skip Credits and Up Next retain their existing transport/countdown presentation.
+    pub fn is_intro_skip(self) -> bool {
+        matches!(self, ControlSlot::Skip(pr) if pr.kind == plx_data::metadata::MarkerKind::Intro)
+    }
     /// Which SEGMENT this row is offering, if any — the row's identity for "have I already offered
     /// this?". Deliberately not the `ControlSlot` itself: `active_marker` is gated on `is_playing`,
     /// so a momentary drop out of Playing mid-segment reads as "no segment" and flips the slot to
