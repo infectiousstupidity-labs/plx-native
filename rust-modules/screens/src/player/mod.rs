@@ -2238,8 +2238,11 @@ mod step_ladder_tests {
         assert_eq!(page.take_row_press(page.slot), Some(RowPress::StandaloneIntro(original)));
         page.hud.dismissed = true;
         let (_, _) = click(&mut page, ELEM_ROW_BASE);
+        assert!(page.presented_row.is_some(), "the last frame had a clickable row");
         page.transport_reset(false);
         assert_eq!(page.take_row_press(page.slot), None, "playback teardown retires in-flight presses");
+        assert!(page.presented_row.is_none(),
+            "the next episode must not inherit an old clickable hit map");
 
         let discs = ControlSlot::Discs(Controls::NONE);
         let original_press = RowPress::Hud { slot: discs, btn: player_hud::BTN_AUDIO };
