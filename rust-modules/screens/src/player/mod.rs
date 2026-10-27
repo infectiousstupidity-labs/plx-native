@@ -2004,6 +2004,20 @@ mod step_ladder_tests {
     }
 
     fn click(page: &mut PlayerScreen, elem: u32) -> (Handled, Vec<PlayerReq>) {
+        // Simulate a painted hit map, rather than fabricating a row hit on a
+        // screen that has never rendered. Stale-hit tests use click_hit directly.
+        if player_hud::row_index(elem).is_some() {
+            let context = cx();
+            let floating = page.standalone_intro(TestHost::session(&context), 1_000).is_some();
+            if !floating && !page.hud.dismissed {
+                page.hud.extend(1_000, input::HUD_LINGER_MS);
+            }
+            page.presented_row = Some((page.slot, floating));
+        }
+        click_hit(page, elem)
+    }
+
+    fn click_hit(page: &mut PlayerScreen, elem: u32) -> (Handled, Vec<PlayerReq>) {
         let mut out = Vec::new();
         let mut present = plx_machine::present::Present::new();
         let ev = ScreenEvent::<TestHost>::Input(InputEvent {
@@ -2099,6 +2113,10 @@ mod step_ladder_tests {
         page.hud.until = 0;
         let ctx = cx();
         assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_some());
+        assert!(page.subs_lift(TestHost::session(&ctx), 1_000),
+            "the floating pill needs the same caption clearance as the HUD control row");
+        assert!(!page.hud_drawn(TestHost::session(&ctx), 1_000),
+            "lifting subtitles must not wake the transport chrome");
         let mut draw = DrawFrame::new(&ctx, plx_ui::Painter::root());
         page.record_stops(&mut draw, false);
         let stops = draw.into_stops();
@@ -2182,10 +2200,80 @@ mod step_ladder_tests {
         page.transport_reset(false);
         assert_eq!(page.take_row_press(page.slot), None, "playback teardown retires in-flight presses");
 
-        page.pending_row_press = Some(RowPress::Hud);
+        let discs = ControlSlot::Discs(Controls::NONE);
+        let original_press = RowPress::Hud { slot: discs, btn: player_hud::BTN_AUDIO };
+        page.pending_row_press = Some(original_press);
+        page.hud.nav.btn = player_hud::BTN_MORE;
         page.hud.dismissed = true;
-        assert_eq!(page.take_row_press(ControlSlot::Discs(Controls::NONE)), Some(RowPress::Hud),
-            "normal row presses do not depend on the HUD dismissal flag");
+        assert_eq!(page.take_row_press(discs), Some(original_press),
+            "normal row presses preserve their press-time button and ignore later dismissal/focus");
+        let intro_slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
+        page.pending_row_press = Some(RowPress::Hud { slot: intro_slot, btn: 0 });
+        assert_eq!(page.take_row_press(ControlSlot::Discs(Controls {
+            previous: true, next: false, restart: false
+        })), None, "a full-HUD Skip must not turn into Previous after the marker expires");
+        page.pending_row_press = Some(RowPress::Hud { slot: intro_slot, btn: 0 });
+        assert_eq!(page.take_row_press(ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(changed))),
+            None, "a full-HUD Skip must not become a different intro");
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    /// Pointer hits are stamped by the LAST render. Even when motion has revealed
+    /// the full HUD, a floating-pill hit from the preceding frame is not a disc.
+    #[test]
+    fn stale_floating_hit_cannot_become_a_visible_hud_control() {
+        use plx_appkit::player_hud::{ControlSlot, Controls, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let marker = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(marker));
+        page.hud.dismissed = true;
+        page.presented_row = Some((page.slot, true));
+
+        // Motion opened the HUD, but a queued click still names the floating row.
+        page.hud.dismissed = false;
+        page.hud.extend(1_000, input::HUD_LINGER_MS);
+        let (_, requests) = click_hit(&mut page, ELEM_ROW_BASE);
+        assert!(requests.is_empty(), "a stale floating hit cannot arm the normal HUD row");
+
+        // The marker disappears before the first normal-HUD repaint.
+        page.slot = ControlSlot::Discs(Controls { previous: true, next: false, restart: false });
+        let (_, requests) = click_hit(&mut page, ELEM_ROW_BASE);
+        assert!(requests.is_empty(), "the stale hit must never trigger Previous");
+
+        // After an actual new paint, the visible disc can be clicked normally.
+        let (_, requests) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.take_row_press(page.slot), Some(RowPress::Hud {
+            slot: page.slot, btn: player_hud::BTN_PREVIOUS,
+        }));
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    #[test]
+    fn interrupting_a_standalone_press_retires_its_screen_identity() {
+        use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let marker = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(marker));
+        page.hud.dismissed = true;
+        let (_, requests) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.pending_row_press, Some(RowPress::StandaloneIntro(marker)));
+        let _ = press(&mut page, SDLK_UP, 0, Edge::Down);
+        assert!(page.pending_row_press.is_none(), "a different key cancelled the armed press");
+        assert_eq!(page.take_row_press(page.slot), None);
         plx_media::player::restore_state_for_test(old_state as u8);
     }
 
