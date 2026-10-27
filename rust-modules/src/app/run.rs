@@ -1994,11 +1994,12 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 if let Some((kind, start)) = offer {
                     log(&format!("marker offer: {kind:?} at {}s", start / 1000));
                 }
-                // A segment beginning puts the HUD ON SCREEN and offers the row — the timer,
-                // the DISMISSAL and the ring in one act, because raising the timer alone left
-                // the tile behind a transport nobody drew. `HudState::raise_for_offer` is where
-                // that rule, its resting-position clause and the bug are written down.
-                player.raise_for_offer(fr.now, fr.ctrl.primary_btn());
+                // Up Next and Skip Credits retain their existing HUD/countdown behavior.
+                // Skip Intro is rendered and activated independently while the HUD is hidden:
+                // offering it must not change the timer, dismissal or focus ring (#13).
+                if !fr.ctrl.is_intro_skip() {
+                    player.raise_for_offer(fr.now, fr.ctrl.primary_btn());
+                }
             } else if plx_appkit::player_hud::standin_left_the_ring(
                 player.hud.was_standin,
                 fr.ctrl,
