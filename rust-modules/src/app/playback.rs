@@ -1190,7 +1190,11 @@ pub(crate) unsafe fn activate_player_row(
     // is borrowed once and the arms below are free to present a panel on it.
     let Some((btn, standalone)) = super::bridge::player_mut(pages).and_then(|page| {
         let press = page.take_row_press(ctrl)?;
-        Some((page.hud.nav.btn, matches!(press, plx_screens::player::RowPress::StandaloneIntro(_))))
+        // Dispatch the button selected on press-down, never a later HUD focus.
+        Some(match press {
+            plx_screens::player::RowPress::Hud { btn, .. } => (btn, false),
+            plx_screens::player::RowPress::StandaloneIntro(_) => (0, true),
+        })
     }) else {
         return; // a cancelled, retired or superseded press has no action
     };
