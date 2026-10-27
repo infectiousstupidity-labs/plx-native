@@ -864,6 +864,27 @@ impl ControlSlot {
     }
 }
 
+#[cfg(test)]
+mod standalone_intro_offer_tests {
+    use super::*;
+    use plx_data::metadata::{Marker, MarkerKind};
+    use plx_media::route::NextEpisodeMode;
+
+    #[test]
+    fn only_intro_skip_is_a_standalone_offer() {
+        let segment = |kind| Marker {
+            kind, start_ms: 10_000, end_ms: 25_000, final_seg: true,
+        };
+        let intro = slot_for(Some(segment(MarkerKind::Intro)), false, NextEpisodeMode::Countdown);
+        let credits = slot_for(Some(segment(MarkerKind::Credits)), false, NextEpisodeMode::Countdown);
+        let up_next = slot_for(Some(segment(MarkerKind::Credits)), true, NextEpisodeMode::Countdown);
+        assert!(intro.is_intro_skip(), "only an intro may be shown without transport chrome");
+        assert!(!credits.is_intro_skip(), "credits keep their existing HUD offer");
+        assert!(!up_next.is_intro_skip(), "the Up Next countdown must still raise the HUD");
+        assert!(!ControlSlot::Discs(Controls::NONE).is_intro_skip());
+    }
+}
+
 /// PURE precedence: given the segment under the playhead and whether the queue has a successor,
 /// which control owns the row. Host-testable, and the ONLY place the ordering is written down.
 ///
