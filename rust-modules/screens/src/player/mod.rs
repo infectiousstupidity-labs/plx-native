@@ -63,7 +63,7 @@ pub const WORD: &str = "player";
 pub const SHAPE: &str =
     "PlayerScreen{hud:{focus:i32,btn:i32,tab:i32,until:u32,dismissed:bool,visible_at_press:bool,\
      exit_armed:bool,back_leaves_at_press:bool,offer:Option<(u32,i64)>,was_standin:bool},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
-     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,pending_row:Option<RowPress>,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
+     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,pending_row:Option<RowPress>,presented_row:Option<(ControlSlot,bool)>,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
 
 /// **The page this playback was launched from**, as the container's own identity.
 ///
@@ -474,6 +474,7 @@ impl PlayerScreen {
             self.hud.hide(false);
         }
         if self.hud_policy == HudPolicy::Normal && policy != HudPolicy::Normal {
+            self.pending_row_press = None;
             self.scrub.cancel();
             self.end_jump_gesture();
             self.publish();
@@ -1602,6 +1603,26 @@ impl LogicalState for PlayerScreen {
                 }
                 RowPress::StandaloneIntro(m) => {
                     c.u32(1).u32(m.kind as u32)
+                        .u64(m.start_ms as u64).u64(m.end_ms as u64)
+                        .bool(m.final_seg);
+                }
+            }
+        });
+        // Pointer activation depends on the last painted hit map, so its row
+        // identity is part of deterministic replay, not merely visual styling.
+        c.option(self.presented_row.as_ref(), |c, (slot, floating)| {
+            c.bool(*floating);
+            match slot {
+                ControlSlot::Discs(controls) => {
+                    c.u32(0).bool(controls.previous).bool(controls.next).bool(controls.restart);
+                }
+                ControlSlot::Skip(pr) => {
+                    c.u32(1).u32(pr.marker.kind as u32)
+                        .u64(pr.marker.start_ms as u64).u64(pr.marker.end_ms as u64)
+                        .bool(pr.marker.final_seg);
+                }
+                ControlSlot::UpNext(m) => {
+                    c.u32(2).u32(m.kind as u32)
                         .u64(m.start_ms as u64).u64(m.end_ms as u64)
                         .bool(m.final_seg);
                 }
