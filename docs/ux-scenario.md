@@ -683,9 +683,19 @@ checklist #48 N/A rather than failing.
 **2. Over a marked segment: a Skip pill.** When the server has marked an intro or credits region and
 the playhead is inside it, a single **Skip Intro** / **Skip Credits** pill takes the row — same
 position, same height, never narrower than the disc pair, so the transport does not visibly jump.
-When the segment begins the HUD is raised and the focus ring is parked on the pill, so **one bare OK
-skips**. OK seeks past the segment and resumes; on a `final` credits marker it finishes the item
-instead. The pill leaves with the segment, and focus returns to the scrubber when it does.
+
+**Skip Intro does not summon the transport.** With the HUD hidden, the same Skip Intro pill floats
+alone over the picture, without the playbar, title or tabs. A bare OK or a pointer click on the pill
+uses the existing Skip action without raising the HUD; an expired marker cannot turn its delayed
+activation into a different control. Pointer motion while it floats does not raise the HUD.
+Normal HUD navigation can still reveal the whole transport, where the pill occupies its usual row.
+Subtitles lift clear of the floating pill, but the transport chrome remains hidden.
+The standalone pill leaves as soon as the marker ends or is skipped.
+
+**Skip Credits retains the previous behavior:** an offer raises the full HUD and parks the ring on
+the pill. OK seeks past an ordinary segment and resumes; on a `final` credits marker it finishes
+the item instead. The pill leaves with the segment, and focus returns to the scrubber where it
+had occupied the normal HUD row.
 
 **3. Over the credits with another episode queued: Up Next.** The row becomes the next episode's
 still, a caption (*"Up Next · S2, E4 · Laura"*), and **two buttons — Watch Credits** on the left and

@@ -63,7 +63,7 @@ pub const WORD: &str = "player";
 pub const SHAPE: &str =
     "PlayerScreen{hud:{focus:i32,btn:i32,tab:i32,until:u32,dismissed:bool,visible_at_press:bool,\
      exit_armed:bool,back_leaves_at_press:bool,offer:Option<(u32,i64)>,was_standin:bool},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
-     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
+     ns:i64},seek_burst:Option<(i64,u32)>,transport_tap:bool,pending_row:Option<RowPress>,presented_row:Option<(ControlSlot,bool)>,origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
 
 /// **The page this playback was launched from**, as the container's own identity.
 ///
@@ -107,6 +107,14 @@ pub enum HudPolicy {
     Hidden,
 }
 
+/// The identity of an armed row action. HUD dismissal is presentation state, not
+/// evidence of what the user pressed; standalone actions retain their marker until commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPress {
+    Hud { slot: ControlSlot, btn: i32 },
+    StandaloneIntro(plx_data::metadata::Marker),
+}
+
 pub struct PlayerScreen {
     entry: EntryId,
     /// The transport HUD's timer, cursor, dismissal and control-row edges.
@@ -117,6 +125,10 @@ pub struct PlayerScreen {
     seek_burst: player_hud::seek_jump::SeekBurst,
     /// A dedicated FF/REW press that has not yet repeated or been released.
     transport_tap: bool,
+    /// Armed at press-down, consumed exactly once on deferred commit.
+    pending_row_press: Option<RowPress>,
+    /// Identity of the row registered in the last painted pointer hit map.
+    presented_row: Option<(ControlSlot, bool)>,
     // (`held: HeldKey` stood here — "the client-side hold-repeat for the bare transport's
     // directions". Nothing armed it after phase 9 put the panels' input on the dispatcher, so it
     // wrote two constant zeros into this screen's canonical state; the type is deleted with the
@@ -169,6 +181,8 @@ impl PlayerScreen {
             scrub: Scrub::IDLE,
             seek_burst: player_hud::seek_jump::SeekBurst::IDLE,
             transport_tap: false,
+            pending_row_press: None,
+            presented_row: None,
             row: TransportRow::new(),
             up_next: Countdown::default(),
             slot: ControlSlot::Discs(player_hud::Controls::NONE),
@@ -223,6 +237,8 @@ impl PlayerScreen {
     /// burst, HUD timer, dismissal and Up Next countdown go with it.
     pub fn transport_reset(&mut self, for_reload: bool) {
         self.transport_tap = false;
+        self.pending_row_press = None;
+        self.presented_row = None;
         self.scrub.cancel();
         self.row.reset_title();
         if !for_reload {
@@ -289,7 +305,11 @@ impl PlayerScreen {
         if !f.records_stops() { return; }
         let mut groups = Vec::new();
         Focusable::<H>::groups(self, f.cx, &mut groups);
-        for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)) {
+        // An intro can register its one existing row stop even when the rest of the
+        // transport has no stops. Draw and hit eligibility use the same policy.
+        let standalone = self.standalone_intro(H::session(f.cx), f.cx.tick.ms).is_some();
+        for g in groups.iter().filter(|g| self.group_drawn(g.id, hud_drawn)
+            || (standalone && g.id == GROUP_ROW)) {
             // The repair alert's buttons are ordinary pressable controls (hover parks focus, the
             // press dips and commits on release); the transport's are `Direct` — see `draw`.
             let (hover, activate) = if g.id == GROUP_REPAIR {
@@ -454,6 +474,7 @@ impl PlayerScreen {
             self.hud.hide(false);
         }
         if self.hud_policy == HudPolicy::Normal && policy != HudPolicy::Normal {
+            self.pending_row_press = None;
             self.scrub.cancel();
             self.end_jump_gesture();
             self.publish();
@@ -470,16 +491,74 @@ impl PlayerScreen {
         self.publish();
     }
 
+    /// Take the *press-time* row identity, not the HUD's dismissal flag at commit.
+    /// An intro that left the playhead, changed markers, or was retired by a playback
+    /// reset cannot silently become Previous, Subtitles or another Skip action.
+    pub fn take_row_press(&mut self, slot: ControlSlot) -> Option<RowPress> {
+        match self.pending_row_press.take()? {
+            RowPress::Hud { slot: pressed, btn }
+                if Self::same_hud_action(pressed, slot, btn) =>
+            {
+                Some(RowPress::Hud { slot: pressed, btn })
+            }
+            RowPress::StandaloneIntro(marker)
+                if matches!(slot, ControlSlot::Skip(pr) if pr.kind == plx_data::metadata::MarkerKind::Intro && pr.marker == marker) =>
+            {
+                Some(RowPress::StandaloneIntro(marker))
+            }
+            _ => None,
+        }
+    }
+
+    /// Validate the selected ACTION, rather than incidental flags of the whole
+    /// controls row. E.g. Subtitles remains Subtitles when Next becomes available.
+    /// Previous is special: its restart/previous-episode meaning must not change.
+    fn same_hud_action(pressed: ControlSlot, current: ControlSlot, btn: i32) -> bool {
+        match (pressed, current) {
+            (ControlSlot::Discs(old), ControlSlot::Discs(new)) => {
+                old.enabled(btn) && new.enabled(btn)
+                    && (btn != player_hud::BTN_PREVIOUS || old.restart == new.restart)
+            }
+            _ => pressed == current && current.enabled(btn),
+        }
+    }
+
+    /// Eligibility for the standalone Skip Intro control, independently of HUD visibility.
+    /// Normal user-opened HUDs still render the same Skip pill in their control row.
+    fn intro_can_float(&self) -> Option<plx_appkit::skip_pill::Prompt> {
+        if self.hud_policy != HudPolicy::Normal || !self.transport
+            || self.repair_alert.visible() || player_hud::readout_owns_frame(self.busy)
+            || !self.row.chrome_interactive() || self.scrub.is_live()
+        {
+            return None;
+        }
+        match self.slot {
+            ControlSlot::Skip(pr) if self.slot.is_intro_skip() => Some(pr),
+            _ => None,
+        }
+    }
+
+    fn standalone_intro(
+        &self,
+        ps: &plx_media::route::PlaybackSession,
+        now: u32,
+    ) -> Option<plx_appkit::skip_pill::Prompt> {
+        if self.hud_up(ps, now) { None } else { self.intro_can_float() }
+    }
+
     /// Does the caption block lift clear of the transport this frame? While the transport is up,
     /// or while a panel is being read over it.
     fn subs_lift(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
+        // The floating pill shares the transport's subtitle clearance band.
+        // Lift text, ASS and bitmap subtitles without drawing transport chrome.
         self.hud_up(ps, now) || self.hud_policy == HudPolicy::Lifted
+            || self.standalone_intro(ps, now).is_some()
     }
 
-    /// Is the transport actually DRAWN this frame? Whenever the captions lift for it, unless the
-    /// repair alert has the screen.
+    /// Caption clearance and transport-chrome visibility are separate decisions.
     fn hud_drawn(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
-        self.subs_lift(ps, now) && !self.repair_alert.visible()
+        (self.hud_up(ps, now) || self.hud_policy == HudPolicy::Lifted)
+            && !self.repair_alert.visible()
     }
 }
 
@@ -640,7 +719,10 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 let ps = H::session(cx);
                 match &input.kind {
                     InputKind::Key { key, sym, wcode, edge, .. } => {
-                        self.handle_key(ps, consts::classify_input(*key, *sym, *wcode), *edge, input.at.ms, fx, H::metadata(cx))
+                        let bound = consts::is_bound(*sym, *wcode)
+                            || *key != plx_machine::machine::Key::Other;
+                        self.handle_key(ps, consts::classify_input(*key, *sym, *wcode),
+                            bound, *edge, input.at.ms, fx, H::metadata(cx))
                     }
                     InputKind::Click { hit, x, .. } => {
                         self.end_jump_gesture();
@@ -657,8 +739,16 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                     // dismissal, which is how a Magic Remote user finds the HUD over full-screen
                     // video. `app/run.rs`'s own motion arm did this and then RETURNED, so the page
                     // never saw a pointer event at all.
-                    InputKind::Pointer { .. } => {
+                    InputKind::Pointer { hit, .. } => {
                         self.end_jump_gesture();
+                        // Hovering over the floating pill must not replace it with the
+                        // transport mid-click. Motion elsewhere is still the Magic
+                        // Remote's normal reveal gesture, including during intros.
+                        if *hit == Some(player_hud::ELEM_ROW_BASE)
+                            && self.standalone_intro(ps, input.at.ms).is_some()
+                        {
+                            return Handled::Yes;
+                        }
                         self.hud.dismissed = false;
                         self.hud.extend(input.at.ms, input::HUD_LINGER_MS);
                         self.publish();
@@ -741,6 +831,27 @@ impl PlayerScreen {
         fx: &mut Effects<'_, H>,
     ) -> Handled {
         use player_hud::{ELEM_FAILURE_BASE, ELEM_FAILURE_END, ELEM_SCRUB, ELEM_TAB_BASE};
+        // A new click abandons any previous pending control press.
+        self.pending_row_press = None;
+        if hit.is_some_and(|e| player_hud::row_index(e).is_some()) {
+            let floating = self.standalone_intro(ps, now).is_some();
+            // Hits belong to the LAST painted frame. A marker may expire, or
+            // pointer motion reveal the HUD, before this event is dispatched.
+            if self.presented_row != Some((self.slot, floating))
+                || (!floating && !self.group_drawn(GROUP_ROW, self.hud_drawn(ps, now)))
+            {
+                return Handled::Yes;
+            }
+        }
+        if hit == Some(player_hud::ELEM_ROW_BASE) {
+            if let Some(prompt) = self.standalone_intro(ps, now) {
+                self.hud.nav.btn = 0;
+                self.hud.hide(false);
+                self.arm_control_row(fx, RowPress::StandaloneIntro(prompt.marker));
+                self.publish();
+                return Handled::Yes;
+            }
+        }
         let failed = plx_appkit::player_hud::transport_hidden(ps);
         let Some(elem) = hit else {
             // **A click that lands on no control at all toggles play/pause** — the `else` arm of
@@ -787,7 +898,7 @@ impl PlayerScreen {
                 self.hud.nav.focus = 1;
                 if !self.slot.enabled(btn) { return Handled::Yes; }
                 self.hud.nav.btn = btn;
-                self.arm_control_row(fx);
+                self.arm_control_row(fx, RowPress::Hud { slot: self.slot, btn });
                 Handled::Yes
             }
             e if (ELEM_TAB_BASE..ELEM_FAILURE_BASE).contains(&e) => {
@@ -857,12 +968,19 @@ impl PlayerScreen {
         &mut self,
         ps: &plx_media::route::PlaybackSession,
         key: consts::Key,
+        bound: bool,
         edge: Edge,
         now: u32,
         fx: &mut Effects<'_, H>,
         meta: plx_data::metadata::MetadataView<'_>,
     ) -> Handled {
         use consts::Key;
+        // Keep this cancellation EXACTLY aligned with app/input.rs: an ignored
+        // remote key cannot abort an armed press. Canonical scripted keys also
+        // count as bound even when their raw SDL fields are empty.
+        if bound && edge == Edge::Down && !matches!(key, Key::Ok) {
+            self.pending_row_press = None;
+        }
         if edge == Edge::Down && !matches!(key, Key::Left { .. } | Key::Right { .. }) {
             self.seek_burst.reset();
             self.drop_transport_tap();
@@ -1009,10 +1127,21 @@ impl PlayerScreen {
     /// arm — a plain play/pause toggle. Port of `key_ok`'s `Route::Player` arm.
     fn key_ok<H: AppLike>(&mut self, now: u32, fx: &mut Effects<'_, H>) {
         let vis = self.hud.visible_at_press;
+        if !vis {
+            if let Some(prompt) = self.intro_can_float() {
+                // note_global_press already cleared any dismissal; restore it without
+                // turning the pending Skip press into normal HUD navigation.
+                self.hud.nav.btn = 0;
+                self.hud.hide(false);
+                self.arm_control_row(fx, RowPress::StandaloneIntro(prompt.marker));
+                self.publish();
+                return;
+            }
+        }
         if self.take_target(now, fx) {
             // OK confirmed the target and the film plays on from it; that is all this press means
         } else if vis && self.hud.nav.focus == 1 {
-            self.arm_control_row(fx);
+            self.arm_control_row(fx, RowPress::Hud { slot: self.slot, btn: self.hud.nav.btn });
         } else if vis && self.hud.nav.focus == 2 {
             let kind = if self.hud.nav.tab == 0 {
                 Some(overlay::OverlayKind::Info)
@@ -1033,8 +1162,9 @@ impl PlayerScreen {
 
     /// The control row's deferred press (`PlayerReq::ArmControlRow`). It takes the page from the
     /// scrubber, so a pending target is cancelled with it.
-    fn arm_control_row<H: AppLike>(&mut self, fx: &mut Effects<'_, H>) {
+    fn arm_control_row<H: AppLike>(&mut self, fx: &mut Effects<'_, H>, press: RowPress) {
         self.scrub.cancel();
+        self.pending_row_press = Some(press);
         Self::ask(fx, PlayerReq::ArmControlRow);
     }
 
@@ -1471,6 +1601,53 @@ impl LogicalState for PlayerScreen {
             c.u64(*target as u64).u32(*at);
         });
         c.bool(self.transport_tap);
+        c.option(self.pending_row_press.as_ref(), |c, pressed| {
+            match pressed {
+                RowPress::Hud { slot, btn } => {
+                    c.u32(0).u32(*btn as u32);
+                    match slot {
+                        ControlSlot::Discs(controls) => {
+                            c.u32(0).bool(controls.previous).bool(controls.next).bool(controls.restart);
+                        }
+                        ControlSlot::Skip(pr) => {
+                            c.u32(1).u32(pr.marker.kind as u32)
+                                .u64(pr.marker.start_ms as u64).u64(pr.marker.end_ms as u64)
+                                .bool(pr.marker.final_seg);
+                        }
+                        ControlSlot::UpNext(m) => {
+                            c.u32(2).u32(m.kind as u32)
+                                .u64(m.start_ms as u64).u64(m.end_ms as u64)
+                                .bool(m.final_seg);
+                        }
+                    }
+                }
+                RowPress::StandaloneIntro(m) => {
+                    c.u32(1).u32(m.kind as u32)
+                        .u64(m.start_ms as u64).u64(m.end_ms as u64)
+                        .bool(m.final_seg);
+                }
+            }
+        });
+        // Pointer activation depends on the last painted hit map, so its row
+        // identity is part of deterministic replay, not merely visual styling.
+        c.option(self.presented_row.as_ref(), |c, (slot, floating)| {
+            c.bool(*floating);
+            match slot {
+                ControlSlot::Discs(controls) => {
+                    c.u32(0).bool(controls.previous).bool(controls.next).bool(controls.restart);
+                }
+                ControlSlot::Skip(pr) => {
+                    c.u32(1).u32(pr.marker.kind as u32)
+                        .u64(pr.marker.start_ms as u64).u64(pr.marker.end_ms as u64)
+                        .bool(pr.marker.final_seg);
+                }
+                ControlSlot::UpNext(m) => {
+                    c.u32(2).u32(m.kind as u32)
+                        .u64(m.start_ms as u64).u64(m.end_ms as u64)
+                        .bool(m.final_seg);
+                }
+            }
+        });
         c.option(self.origin.as_ref(), |c, o| {
             c.u32(o.entry.0);
         });
@@ -1541,6 +1718,14 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
             self.draw_hud(ps, now, f.measure, H::metadata(f.cx));
         } else {
             self.row.reset_title();
+            if let Some(prompt) = self.standalone_intro(ps, now) {
+                // The same measured pill, on the same control-row rect, without
+                // the playbar, backdrop ramp, title, or bottom tabs.
+                let pressed = self.pending_row_press == Some(RowPress::StandaloneIntro(prompt.marker));
+                plx_appkit::skip_pill::draw_standalone(
+                    &mut self.row, plx_ui::Painter::root(), prompt, pressed, f.measure,
+                );
+            }
         }
         // The read-out is NOT transport chrome — it is drawn whether or not the HUD is up, so a
         // terminal `Error` (which is not `is_busy()`, so it does not pin the HUD) keeps its message
@@ -1550,6 +1735,15 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         if self.repair_alert.visible() {
             self.repair_alert.draw_scrim();
             self.repair_alert.draw(plx_platform::i18n::msg::settings_cancel_c(), plx_platform::i18n::msg::widgets_repair_action_c(), f.measure);
+        }
+        if f.records_stops() {
+            // Keep the control identity that the published hit map refers to.
+            let floating = self.standalone_intro(ps, now).is_some();
+            self.presented_row = if floating || self.group_drawn(GROUP_ROW, hud_drawn) {
+                Some((self.slot, floating))
+            } else {
+                None
+            };
         }
         self.record_stops(f, hud_drawn);
     }
@@ -1851,6 +2045,20 @@ mod step_ladder_tests {
     }
 
     fn click(page: &mut PlayerScreen, elem: u32) -> (Handled, Vec<PlayerReq>) {
+        // Simulate a painted hit map, rather than fabricating a row hit on a
+        // screen that has never rendered. Stale-hit tests use click_hit directly.
+        if player_hud::row_index(elem).is_some() {
+            let context = cx();
+            let floating = page.standalone_intro(TestHost::session(&context), 1_000).is_some();
+            if !floating && !page.hud.dismissed {
+                page.hud.extend(1_000, input::HUD_LINGER_MS);
+            }
+            page.presented_row = Some((page.slot, floating));
+        }
+        click_hit(page, elem)
+    }
+
+    fn click_hit(page: &mut PlayerScreen, elem: u32) -> (Handled, Vec<PlayerReq>) {
         let mut out = Vec::new();
         let mut present = plx_machine::present::Present::new();
         let ev = ScreenEvent::<TestHost>::Input(InputEvent {
@@ -1920,6 +2128,315 @@ mod step_ladder_tests {
             let got: Vec<u32> = f.into_stops().iter().map(|s| s.key.elem).collect();
             assert_eq!(got, want, "transport={transport} hud_drawn={hud_drawn}");
         }
+    }
+
+    /// #13: when an intro arrives over a hidden HUD, the sole pointer stop is
+    /// the existing Skip pill. Neither the scrubber nor the tabs may leak
+    /// through, and clicking it must not arm the full HUD's linger timer.
+    #[test]
+    fn standalone_intro_only_registers_its_button_and_click_does_not_reveal_hud() {
+        use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        use plx_machine::machine::FocusKey;
+        use plx_ui::hit::{HitMap, PointerKind};
+        use plx_ui::screen::{At, DrawFrame};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(Marker {
+            kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false,
+        }));
+        page.hud.dismissed = true;
+        page.hud.until = 0;
+        let ctx = cx();
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_some());
+        assert!(page.subs_lift(TestHost::session(&ctx), 1_000),
+            "the floating pill needs the same caption clearance as the HUD control row");
+        assert!(!page.hud_drawn(TestHost::session(&ctx), 1_000),
+            "lifting subtitles must not wake the transport chrome");
+        let mut draw = DrawFrame::new(&ctx, plx_ui::Painter::root());
+        page.record_stops(&mut draw, false);
+        let stops = draw.into_stops();
+        assert_eq!(stops.iter().map(|s| s.key.elem).collect::<Vec<_>>(), vec![ELEM_ROW_BASE]);
+        let mut map = HitMap::new();
+        map.fill(stops);
+        map.swap();
+        let pill = Focusable::<TestHost>::place(&page, &ELEM_ROW_BASE, &ctx, At::Drawn).unwrap();
+        let hit = map.resolve(Some(ENTRY), PointerKind::Click, pill.rect.cx(), pill.rect.cy(), None);
+        assert_eq!(hit.activate.map(|(k, _)| k), Some(FocusKey { entry: ENTRY, elem: ELEM_ROW_BASE }));
+
+        let (handled, reqs) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(handled, Handled::Yes);
+        assert_eq!(reqs, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.hud.until, 0, "a Skip click must not extend the transport timer");
+        assert!(page.hud.dismissed, "the full HUD stays down during the deferred press");
+
+        page.hud.dismissed = false;
+        page.hud.until = 10_000;
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "when the viewer opened the HUD the pill belongs to the normal control row");
+        page.hud.dismissed = true;
+        page.set_hud_policy(HudPolicy::Hidden);
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "a covering modal/capsule must withhold the standalone prompt");
+        page.set_hud_policy(HudPolicy::Normal);
+        page.busy = player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed");
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "a failed playback cannot expose a live-looking skip");
+        page.busy = player_hud::Busy::None;
+        page.transport = false;
+        assert!(page.standalone_intro(TestHost::session(&ctx), 1_000).is_none(),
+            "an Info/Chapters surface owns its area");
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    /// A standalone press stays tied to the exact marker despite HUD changes.
+    /// It cannot activate a different row occupant, including a second intro.
+    #[test]
+    fn standalone_intro_commit_requires_the_original_marker() {
+        use plx_appkit::player_hud::{ControlSlot, Controls, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let original = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
+        let changed = Marker { end_ms: 11_000, ..original };
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
+        page.hud.dismissed = true;
+        let (_, reqs) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(reqs, vec![PlayerReq::ArmControlRow]);
+        page.hud.dismissed = false; // e.g. pointer moved while the press was pending
+        assert_eq!(page.take_row_press(ControlSlot::Discs(Controls {
+            previous: true, next: false, restart: false
+        })), None, "never turn Skip into Previous");
+        assert_eq!(page.take_row_press(page.slot), None, "the old press was consumed");
+
+        // A click resolved on the previous frame's floating-pill stop must
+        // not arm the newly revealed Previous disc after the intro expires.
+        page.slot = ControlSlot::Discs(Controls {
+            previous: true, next: false, restart: false,
+        });
+        page.hud.dismissed = true;
+        let (_, reqs) = click(&mut page, ELEM_ROW_BASE);
+        assert!(reqs.is_empty(), "a retired pill's stale hit must do nothing");
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
+
+        page.hud.dismissed = true;
+        let (_, _) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(page.take_row_press(ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(changed))),
+            None, "a different intro cannot inherit this press");
+
+        page.hud.dismissed = true;
+        let (_, _) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(page.take_row_press(page.slot), Some(RowPress::StandaloneIntro(original)));
+        page.hud.dismissed = true;
+        let (_, _) = click(&mut page, ELEM_ROW_BASE);
+        assert!(page.presented_row.is_some(), "the last frame had a clickable row");
+        page.transport_reset(false);
+        assert_eq!(page.take_row_press(page.slot), None, "playback teardown retires in-flight presses");
+        assert!(page.presented_row.is_none(),
+            "the next episode must not inherit an old clickable hit map");
+
+        let discs = ControlSlot::Discs(Controls::NONE);
+        let original_press = RowPress::Hud { slot: discs, btn: player_hud::BTN_AUDIO };
+        page.pending_row_press = Some(original_press);
+        page.hud.nav.btn = player_hud::BTN_MORE;
+        page.hud.dismissed = true;
+        assert_eq!(page.take_row_press(discs), Some(original_press),
+            "normal row presses preserve their press-time button and ignore later dismissal/focus");
+        page.pending_row_press = Some(original_press);
+        let changed_discs = ControlSlot::Discs(Controls {
+            previous: true, next: true, restart: true,
+        });
+        assert_eq!(page.take_row_press(changed_discs), Some(original_press),
+            "a change in episode navigation must not swallow an Audio press");
+        let before_previous = ControlSlot::Discs(Controls {
+            previous: true, next: true, restart: false,
+        });
+        let previous_press = RowPress::Hud { slot: before_previous, btn: player_hud::BTN_PREVIOUS };
+        page.pending_row_press = Some(previous_press);
+        assert_eq!(page.take_row_press(changed_discs), None,
+            "Previous becoming Restart mid-press must not change the requested action");
+        let intro_slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(original));
+        page.pending_row_press = Some(RowPress::Hud { slot: intro_slot, btn: 0 });
+        assert_eq!(page.take_row_press(ControlSlot::Discs(Controls {
+            previous: true, next: false, restart: false
+        })), None, "a full-HUD Skip must not turn into Previous after the marker expires");
+        page.pending_row_press = Some(RowPress::Hud { slot: intro_slot, btn: 0 });
+        assert_eq!(page.take_row_press(ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(changed))),
+            None, "a full-HUD Skip must not become a different intro");
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    /// Sweep every old/new episode-navigation flag combination and every button,
+    /// including out-of-range indices. The selected semantic action is stable even
+    /// when irrelevant flags change, but Previous must not silently become Restart.
+    #[test]
+    fn deferred_disc_action_matrix_is_safe_and_does_not_drop_unrelated_actions() {
+        use plx_appkit::player_hud::{ControlSlot, Controls};
+        let _g = plx_base::testlock::serial();
+        let flags = |bits: u8| Controls {
+            previous: bits & 1 != 0,
+            next: bits & 2 != 0,
+            restart: bits & 4 != 0,
+        };
+        let mut page = PlayerScreen::new(ENTRY);
+        for old_bits in 0..8 {
+            for new_bits in 0..8 {
+                let old = flags(old_bits);
+                let new = flags(new_bits);
+                for btn in -1..=player_hud::BTN_N {
+                    let pressed = RowPress::Hud { slot: ControlSlot::Discs(old), btn };
+                    page.pending_row_press = Some(pressed);
+                    let expected = match btn {
+                        player_hud::BTN_PREVIOUS => {
+                            old.previous && new.previous && old.restart == new.restart
+                        }
+                        player_hud::BTN_NEXT => old.next && new.next,
+                        player_hud::BTN_SUBTITLES | player_hud::BTN_AUDIO | player_hud::BTN_MORE => true,
+                        _ => false,
+                    };
+                    assert_eq!(
+                        page.take_row_press(ControlSlot::Discs(new)).is_some(),
+                        expected,
+                        "old={old_bits:03b}, new={new_bits:03b}, button={btn}",
+                    );
+                    assert_eq!(page.take_row_press(ControlSlot::Discs(new)), None,
+                        "no action may be committed twice");
+                }
+            }
+        }
+    }
+
+    /// Pointer hits are stamped by the LAST render. Even when motion has revealed
+    /// the full HUD, a floating-pill hit from the preceding frame is not a disc.
+    #[test]
+    fn stale_floating_hit_cannot_become_a_visible_hud_control() {
+        use plx_appkit::player_hud::{ControlSlot, Controls, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let marker = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(marker));
+        page.hud.dismissed = true;
+        page.presented_row = Some((page.slot, true));
+
+        // Motion opened the HUD, but a queued click still names the floating row.
+        page.hud.dismissed = false;
+        page.hud.extend(1_000, input::HUD_LINGER_MS);
+        let (_, requests) = click_hit(&mut page, ELEM_ROW_BASE);
+        assert!(requests.is_empty(), "a stale floating hit cannot arm the normal HUD row");
+
+        // The marker disappears before the first normal-HUD repaint.
+        page.slot = ControlSlot::Discs(Controls { previous: true, next: false, restart: false });
+        let (_, requests) = click_hit(&mut page, ELEM_ROW_BASE);
+        assert!(requests.is_empty(), "the stale hit must never trigger Previous");
+
+        // After an actual new paint, the visible disc can be clicked normally.
+        let (_, requests) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.take_row_press(page.slot), Some(RowPress::Hud {
+            slot: page.slot, btn: player_hud::BTN_PREVIOUS,
+        }));
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    #[test]
+    fn interrupting_a_standalone_press_retires_its_screen_identity() {
+        use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let marker = Marker { kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false };
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(marker));
+        page.hud.dismissed = true;
+        let (_, requests) = click(&mut page, ELEM_ROW_BASE);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert_eq!(page.pending_row_press, Some(RowPress::StandaloneIntro(marker)));
+        // Unsupported keys must not cancel the global press or its row identity.
+        let _ = press(&mut page, 0xFEED, 0, Edge::Down);
+        assert_eq!(page.pending_row_press, Some(RowPress::StandaloneIntro(marker)),
+            "unbound remote keys cannot cancel a pending Skip");
+        let _ = press(&mut page, SDLK_UP, 0, Edge::Down);
+        assert!(page.pending_row_press.is_none(), "a bound different key cancelled the armed press");
+        assert_eq!(page.take_row_press(page.slot), None);
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    #[test]
+    fn pointer_over_intro_does_not_wake_hud_but_elsewhere_does() {
+        use plx_appkit::player_hud::{ControlSlot, ELEM_ROW_BASE};
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        let was_paused = plx_media::player::TX.paused.swap(false, std::sync::atomic::Ordering::Relaxed);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(Marker {
+            kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false,
+        }));
+        page.hud.hide(false);
+        let move_at = |page: &mut PlayerScreen, hit| {
+            let mut out = Vec::new();
+            let mut present = plx_machine::present::Present::new();
+            let ev = ScreenEvent::<TestHost>::Input(InputEvent {
+                kind: InputKind::Pointer { x: 0.0, y: 0.0, hit },
+                at: Tick { ms: 1_000, dt_us: 0 },
+                source: Source::Sdl,
+            });
+            page.step(&ev, &cx(), &mut Effects::new(&mut out, MachineId::Instance(INST), &mut present))
+        };
+        assert_eq!(move_at(&mut page, Some(ELEM_ROW_BASE)), Handled::Yes);
+        assert!(page.hud.dismissed);
+        assert_eq!(page.hud.until, 0);
+        assert_eq!(move_at(&mut page, None), Handled::Yes);
+        assert!(!page.hud.dismissed);
+        assert!(page.hud.until > 1_000);
+        plx_media::player::TX.paused.store(was_paused, std::sync::atomic::Ordering::Relaxed);
+        plx_media::player::restore_state_for_test(old_state as u8);
+    }
+
+    /// A bound OK un-dismisses HUD state before the screen sees it. The saved
+    /// pre-press visibility must win so a hidden Skip Intro neither toggles
+    /// pause nor reveals transport chrome, even inside an unexpired linger.
+    #[test]
+    fn hidden_intro_ok_arms_one_skip_without_waking_the_hud() {
+        use plx_data::metadata::{Marker, MarkerKind};
+        let _g = plx_base::testlock::serial();
+        let context = cx();
+        let ps = TestHost::session(&context);
+        let old_state = plx_media::player::state(ps);
+        plx_media::player::restore_state_for_test(plx_media::player::PlaybackState::Playing as u8);
+        let mut page = PlayerScreen::new(ENTRY);
+        page.slot = player_hud::ControlSlot::Skip(plx_appkit::skip_pill::prompt_for(Marker {
+            kind: MarkerKind::Intro, start_ms: 1_000, end_ms: 10_000, final_seg: false,
+        }));
+        page.hud.until = 10_000; // intentionally hand-hidden before the linger expires
+        page.hud.dismissed = true;
+        let (handled, requests) = bound_press(&mut page, SDLK_RETURN, 0);
+        assert_eq!(handled, Handled::Yes);
+        assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
+        assert!(page.hud.dismissed, "the press must restore the hand-hide");
+        assert_eq!(page.hud.until, 10_000, "a standalone action must not reset HUD timeout");
+        assert_eq!(page.hud.nav.btn, 0);
+        plx_media::player::restore_state_for_test(old_state as u8);
     }
 
     /// **The failure notice expiring owes a frame.** Nothing else on the screen changes when the

@@ -446,9 +446,12 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     // drawn and the user got a blank screen instead of a transport.
     bridge.seed_player_hud(hud_ms);
     if let Some(player) = super::bridge::player_mut(pages) {
+        // Auto-advance reuses the mounted PlayerScreen. Retire deferred presses
+        // and its previous pointer hit identity BEFORE installing the new item;
+        // a pair of episodes may have identical Skip timestamps or disc layouts.
+        player.transport_reset(false);
         player.hud = HudState::IDLE;
         player.scrub = Scrub::IDLE;
-        player.up_next.reset();
         player.hud.extend(clock::now(), hud_ms);
         player.publish();
     }
@@ -1172,6 +1175,9 @@ fn apply_info_action(
 /// activation acts on the row that is DRAWN — the slot is resolved once per loop iteration for input,
 /// update and draw alike (see the `let ctrl` at the top of the loop), and an offer that arrived
 /// mid-press has already changed what the user is looking at.
+/// Standalone presses carry their marker identity from press-down to this deferred
+/// commit; only PlayerScreen may validate and consume that identity.
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn activate_player_row(
     player: &mut plx_media::player::machine::Player,
@@ -1185,7 +1191,16 @@ pub(crate) unsafe fn activate_player_row(
 ) {
     // The cursor is the instance's; read the one field this dispatch turns on, so the container
     // is borrowed once and the arms below are free to present a panel on it.
-    let btn = super::bridge::player(pages).map_or(0, |player| player.hud.nav.btn);
+    let Some((btn, standalone)) = super::bridge::player_mut(pages).and_then(|page| {
+        let press = page.take_row_press(ctrl)?;
+        // Dispatch the button selected on press-down, never a later HUD focus.
+        Some(match press {
+            plx_screens::player::RowPress::Hud { btn, .. } => (btn, false),
+            plx_screens::player::RowPress::StandaloneIntro(_) => (0, true),
+        })
+    }) else {
+        return; // a cancelled, retired or superseded press has no action
+    };
     if let plx_appkit::player_hud::ControlSlot::Discs(controls) = ctrl {
         // The discs are what row 1 holds — the complement of the stand-in arm below, and the
         // row's only other occupant. OK on a control disc PRESENTS its panel on this page's own
@@ -1220,7 +1235,11 @@ pub(crate) unsafe fn activate_player_row(
         );
     }
     if let Some(player) = super::bridge::player_mut(pages) {
-        player.hud.extend(now, HUD_LINGER_MS);
+        // Only an actual standalone press suppresses the HUD extension.
+        // Normal HUD actions are never gated by dismissed, even during buffering.
+        if !standalone {
+            player.hud.extend(now, HUD_LINGER_MS);
+        }
         player.publish();
     }
 }

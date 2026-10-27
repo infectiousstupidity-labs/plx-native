@@ -4,10 +4,10 @@
 //! same height — and the discs return the moment the segment ends.
 //!
 //! Replacing them rather than joining them is the design call: one wide unmissable target in the
-//! spot the eye already goes for transport controls. The cost is that CC/Audio are unreachable for
-//! the length of the segment, and that the button only exists while the HUD is up — which is why
-//! `app.rs` RAISES the HUD once when a segment begins and parks focus here, so a bare OK still
-//! skips in one press instead of three.
+//! spot the eye already goes for transport controls. CC/Audio are displaced while the full HUD
+//! shows a marked segment. Skip Intro can also draw the same pill alone while the HUD is hidden,
+//! without its timer or focus changing: a bare OK and a pointer click both take that offer.
+//! Skip Credits still raises the full HUD; Up Next keeps its separate countdown behavior.
 #![allow(dead_code)]
 use plx_data::metadata::{self, MarkerKind};
 use plx_ui::theme;
@@ -31,7 +31,7 @@ pub enum SkipAction {
 /// asking "is the playhead in a credits segment?" by string-comparing user-facing copy made a pure
 /// copy-edit — the sort of thing a design pass does — silently disable Up Next and auto-advance,
 /// with no compile error and nothing to fail.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prompt {
     /// the segment itself — carried so activating the button can retire it (`metadata::mark_skipped`)
     pub marker: metadata::Marker,
@@ -81,6 +81,18 @@ pub fn rect(row: &mut crate::player_hud::TransportRow, pr: Prompt, measure: &dyn
 
 /// Draw the button in the control row. Called by `player_hud` INSTEAD of the two discs.
 pub fn draw(row: &mut crate::player_hud::TransportRow, p: Painter, pr: Prompt, focused: bool, measure: &dyn plx_machine::machine::Measure) {
+    let scale = row.scale(0);
+    draw_scaled(row, p, pr, focused, measure, scale);
+}
+
+/// The hidden-HUD pill has no focused transport row. Apply the already-armed
+/// control-face press directly; do not move the HUD's navigation ring to fake focus.
+pub fn draw_standalone(row: &mut crate::player_hud::TransportRow, p: Painter, pr: Prompt, armed: bool, measure: &dyn plx_machine::machine::Measure) {
+    let scale = if armed { plx_ui::press::scale() } else { 1.0 };
+    draw_scaled(row, p, pr, false, measure, scale);
+}
+
+fn draw_scaled(row: &mut crate::player_hud::TransportRow, p: Painter, pr: Prompt, focused: bool, measure: &dyn plx_machine::machine::Measure, scale: f32) {
     let Ok(label) = CString::new(pr.label()) else {
         return;
     };
@@ -89,9 +101,8 @@ pub fn draw(row: &mut crate::player_hud::TransportRow, p: Painter, pr: Prompt, f
     // Its slot's only item, so index 0 — the pop is the control ROW's (`TransportRow::scale`),
     // shared with the transport discs this pill stands in for.
     let slot = rect(row, pr, measure);
-    let pop = row.scale(0);
     Button::new(label.as_ptr(), theme::size::BODY, slot)
-        .scale(pop)
+        .scale(scale)
         .focused(focused)
         // It stands in the transport discs' own slot, over the video plane and on the HUD's ramp,
         // so it wears their ground as well as their pop — see `ControlGround`.

@@ -787,7 +787,7 @@ impl Controls {
 /// the alternative — re-deriving the three-way choice at each of the draw, the OK handler, the
 /// pointer handler, the LEFT/RIGHT pin and `icon_hit` — encodes its precedence in the order of five
 /// separate if-chains, with nothing to keep them agreeing and nothing to test.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlSlot {
     /// the ordinary Subtitles, Audio and More discs
     Discs(Controls),
@@ -827,6 +827,11 @@ impl ControlSlot {
     pub fn is_discs(self) -> bool {
         matches!(self, ControlSlot::Discs(_))
     }
+    /// Skip Intro alone may float over the picture without revealing the full HUD.
+    /// Skip Credits and Up Next retain their existing transport/countdown presentation.
+    pub fn is_intro_skip(self) -> bool {
+        matches!(self, ControlSlot::Skip(pr) if pr.kind == plx_data::metadata::MarkerKind::Intro)
+    }
     /// Which SEGMENT this row is offering, if any — the row's identity for "have I already offered
     /// this?". Deliberately not the `ControlSlot` itself: `active_marker` is gated on `is_playing`,
     /// so a momentary drop out of Playing mid-segment reads as "no segment" and flips the slot to
@@ -861,6 +866,27 @@ impl ControlSlot {
                 if idx == crate::up_next::BTN_NEXT { l.next } else { l.credits }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod standalone_intro_offer_tests {
+    use super::*;
+    use plx_data::metadata::{Marker, MarkerKind};
+    use plx_media::route::NextEpisodeMode;
+
+    #[test]
+    fn only_intro_skip_is_a_standalone_offer() {
+        let segment = |kind| Marker {
+            kind, start_ms: 10_000, end_ms: 25_000, final_seg: true,
+        };
+        let intro = slot_for(Some(segment(MarkerKind::Intro)), false, NextEpisodeMode::Countdown);
+        let credits = slot_for(Some(segment(MarkerKind::Credits)), false, NextEpisodeMode::Countdown);
+        let up_next = slot_for(Some(segment(MarkerKind::Credits)), true, NextEpisodeMode::Countdown);
+        assert!(intro.is_intro_skip(), "only an intro may be shown without transport chrome");
+        assert!(!credits.is_intro_skip(), "credits keep their existing HUD offer");
+        assert!(!up_next.is_intro_skip(), "the Up Next countdown must still raise the HUD");
+        assert!(!ControlSlot::Discs(Controls::NONE).is_intro_skip());
     }
 }
 
