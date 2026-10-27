@@ -689,6 +689,7 @@ alone over the picture, without the playbar, title or tabs. A bare OK or a point
 uses the existing Skip action without raising the HUD; an expired marker cannot turn its delayed
 activation into a different control. Pointer motion while it floats does not raise the HUD.
 Normal HUD navigation can still reveal the whole transport, where the pill occupies its usual row.
+Subtitles lift clear of the floating pill, but the transport chrome remains hidden.
 The standalone pill leaves as soon as the marker ends or is skipped.
 
 **Skip Credits retains the previous behavior:** an offer raises the full HUD and parks the ring on
