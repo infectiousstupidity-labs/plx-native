@@ -446,6 +446,10 @@ pub(super) fn start_playback_with<R: PlaybackResources>(
     // drawn and the user got a blank screen instead of a transport.
     bridge.seed_player_hud(hud_ms);
     if let Some(player) = super::bridge::player_mut(pages) {
+        // Auto-advance reuses the mounted PlayerScreen. Retire deferred presses
+        // and its previous pointer hit identity BEFORE installing the new item;
+        // a pair of episodes may have identical Skip timestamps or disc layouts.
+        player.transport_reset(false);
         player.hud = HudState::IDLE;
         player.scrub = Scrub::IDLE;
         player.up_next.reset();
