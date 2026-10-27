@@ -704,7 +704,10 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 let ps = H::session(cx);
                 match &input.kind {
                     InputKind::Key { key, sym, wcode, edge, .. } => {
-                        self.handle_key(ps, consts::classify_input(*key, *sym, *wcode), *edge, input.at.ms, fx, H::metadata(cx))
+                        let bound = consts::is_bound(*sym, *wcode)
+                            || *key != plx_machine::machine::Key::Other;
+                        self.handle_key(ps, consts::classify_input(*key, *sym, *wcode),
+                            bound, *edge, input.at.ms, fx, H::metadata(cx))
                     }
                     InputKind::Click { hit, x, .. } => {
                         self.end_jump_gesture();
@@ -950,15 +953,17 @@ impl PlayerScreen {
         &mut self,
         ps: &plx_media::route::PlaybackSession,
         key: consts::Key,
+        bound: bool,
         edge: Edge,
         now: u32,
         fx: &mut Effects<'_, H>,
         meta: plx_data::metadata::MetadataView<'_>,
     ) -> Handled {
         use consts::Key;
-        // The app cancels an armed press on a different bound key. Retire the
-        // screen's deferred target too; a cancelled pill is no longer armed.
-        if edge == Edge::Down && !matches!(key, Key::Ok) {
+        // Keep this cancellation EXACTLY aligned with app/input.rs: an ignored
+        // remote key cannot abort an armed press. Canonical scripted keys also
+        // count as bound even when their raw SDL fields are empty.
+        if bound && edge == Edge::Down && !matches!(key, Key::Ok) {
             self.pending_row_press = None;
         }
         if edge == Edge::Down && !matches!(key, Key::Left { .. } | Key::Right { .. }) {
@@ -2292,8 +2297,12 @@ mod step_ladder_tests {
         let (_, requests) = click(&mut page, ELEM_ROW_BASE);
         assert_eq!(requests, vec![PlayerReq::ArmControlRow]);
         assert_eq!(page.pending_row_press, Some(RowPress::StandaloneIntro(marker)));
+        // Unsupported keys must not cancel the global press or its row identity.
+        let _ = press(&mut page, 0xFEED, 0, Edge::Down);
+        assert_eq!(page.pending_row_press, Some(RowPress::StandaloneIntro(marker)),
+            "unbound remote keys cannot cancel a pending Skip");
         let _ = press(&mut page, SDLK_UP, 0, Edge::Down);
-        assert!(page.pending_row_press.is_none(), "a different key cancelled the armed press");
+        assert!(page.pending_row_press.is_none(), "a bound different key cancelled the armed press");
         assert_eq!(page.take_row_press(page.slot), None);
         plx_media::player::restore_state_for_test(old_state as u8);
     }
